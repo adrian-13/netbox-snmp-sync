@@ -1,0 +1,39 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+
+{% block content %}
+<div class="row">
+  <div class="col col-md-6">
+    <div class="card">
+      <h2 class="card-header">SNMP</h2>
+      <table class="table table-hover attr-table">
+        <tr><th scope="row">Device</th><td>{{ object.device|linkify }}</td></tr>
+        <tr><th scope="row">Enabled</th><td>{{ object.enabled|yesno:"Yes,No" }}</td></tr>
+        <tr><th scope="row">Version</th><td>{{ object.get_snmp_version_display }}</td></tr>
+        <tr><th scope="row">Port</th><td>{{ object.port }}</td></tr>
+        <tr><th scope="row">Community</th><td>{{ object.community|placeholder }}</td></tr>
+        <tr><th scope="row">Target</th><td>{{ object.target|placeholder }}</td></tr>
+      </table>
+    </div>
+  </div>
+  <div class="col col-md-6">
+    <div class="card">
+      <h2 class="card-header">SNMPv3</h2>
+      <table class="table table-hover attr-table">
+        <tr><th scope="row">Username</th><td>{{ object.username|placeholder }}</td></tr>
+        <tr><th scope="row">Auth protocol</th><td>{{ object.get_auth_protocol_display }}</td></tr>
+        <tr><th scope="row">Priv protocol</th><td>{{ object.get_priv_protocol_display }}</td></tr>
+      </table>
+    </div>
+    <div class="card">
+      <h2 class="card-header">Behaviour</h2>
+      <table class="table table-hover attr-table">
+        <tr><th scope="row">Timeout</th><td>{{ object.timeout }} s</td></tr>
+        <tr><th scope="row">Retries</th><td>{{ object.retries }}</td></tr>
+        <tr><th scope="row">Default ethernet type</th><td>{{ object.default_ethernet_type|placeholder }}</td></tr>
+        <tr><th scope="row">Skip loopback IPs</th><td>{{ object.skip_loopback_ips|yesno:"Yes,No" }}</td></tr>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}

@@ -1,0 +1,81 @@
+{% extends 'base/layout.html' %}
+{% load helpers %}
+
+{% block title %}SNMP Preview — {{ device }}{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-2">
+  <h1 class="h3">SNMP Preview — {{ device|linkify }}</h1>
+</div>
+<p class="text-muted">Selected new/changed objects will be written (add-only). Unchecked items are skipped.</p>
+
+<form method="post">
+  {% csrf_token %}
+  <input type="hidden" name="snapshot" value="{{ snapshot }}">
+
+  <div class="card mb-3">
+    <h2 class="card-header">Interfaces</h2>
+    <table class="table table-hover">
+      <thead>
+        <tr><th style="width:2rem"></th><th>Name</th><th>Status</th><th>Type</th><th>Speed</th><th>Parent</th><th>Changes</th></tr>
+      </thead>
+      <tbody>
+        {% for i in diff.interfaces %}
+        <tr>
+          <td>
+            {% if i.status == 'new' or i.status == 'changed' %}
+              <input class="form-check-input" type="checkbox" name="iface" value="{{ i.name }}" checked>
+            {% endif %}
+          </td>
+          <td>{{ i.name }}</td>
+          <td>
+            {% if i.status == 'new' %}<span class="badge text-bg-green">NEW</span>
+            {% elif i.status == 'changed' %}<span class="badge text-bg-orange">CHANGED</span>
+            {% elif i.status == 'ignored' %}<span class="badge text-bg-gray">ignored</span>
+            {% else %}<span class="badge text-bg-blue">exists</span>{% endif %}
+          </td>
+          <td>{{ i.type }}</td>
+          <td>{{ i.speed }}</td>
+          <td>{{ i.parent|placeholder }}</td>
+          <td>
+            {% for c in i.changes %}<div><code>{{ c.field }}</code>: {{ c.old }} → {{ c.new }}</div>{% endfor %}
+          </td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="7" class="text-muted">No interfaces reported.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="card mb-3">
+    <h2 class="card-header">IP addresses</h2>
+    <table class="table table-hover">
+      <thead>
+        <tr><th style="width:2rem"></th><th>Address</th><th>Status</th><th>Interface</th></tr>
+      </thead>
+      <tbody>
+        {% for ip in diff.ips %}
+        <tr>
+          <td>
+            {% if ip.status == 'new' %}
+              <input class="form-check-input" type="checkbox" name="ip" value="{{ ip.address }}" checked>
+            {% endif %}
+          </td>
+          <td>{{ ip.address }}</td>
+          <td>{% if ip.status == 'new' %}<span class="badge text-bg-green">NEW</span>{% else %}<span class="badge text-bg-blue">exists</span>{% endif %}</td>
+          <td>{{ ip.iface }}</td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="4" class="text-muted">No IP addresses reported.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  <div class="text-end mb-4">
+    <a href="{{ object.get_absolute_url }}" class="btn btn-outline-secondary">Cancel</a>
+    <button type="submit" class="btn btn-primary"><i class="mdi mdi-content-save"></i> Write selected</button>
+  </div>
+</form>
+{% endblock %}

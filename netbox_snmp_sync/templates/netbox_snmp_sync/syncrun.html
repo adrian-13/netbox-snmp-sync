@@ -1,0 +1,67 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+
+{% block content %}
+{% if object.can_revert %}
+<div class="text-end mb-2">
+  <a href="{% url 'plugins:netbox_snmp_sync:syncrun_revert' pk=object.pk %}" class="btn btn-warning">
+    <i class="mdi mdi-undo-variant"></i> Revert run
+  </a>
+</div>
+{% endif %}
+<div class="row">
+  <div class="col col-md-6">
+    <div class="card">
+      <h2 class="card-header">Sync Run</h2>
+      <table class="table table-hover attr-table">
+        <tr><th scope="row">Device</th><td>{{ object.device|linkify|placeholder }}</td></tr>
+        <tr><th scope="row">When</th><td>{{ object.created }}</td></tr>
+        <tr><th scope="row">Trigger</th><td>{% badge object.get_trigger_display bg_color=object.get_trigger_color %}</td></tr>
+        <tr><th scope="row">Mode</th><td>{% badge object.get_mode_display bg_color=object.get_mode_color %}</td></tr>
+        <tr><th scope="row">Status</th><td>{% badge object.get_status_display bg_color=object.get_status_color %}</td></tr>
+        <tr><th scope="row">Reverted</th><td>{{ object.reverted|yesno:"Yes,No" }}</td></tr>
+      </table>
+    </div>
+  </div>
+  <div class="col col-md-6">
+    <div class="card">
+      <h2 class="card-header">Counters</h2>
+      <table class="table table-hover attr-table">
+        <tr><th scope="row">Interfaces created</th><td>{{ object.interfaces_created }}</td></tr>
+        <tr><th scope="row">Interfaces updated</th><td>{{ object.interfaces_updated }}</td></tr>
+        <tr><th scope="row">Interfaces existing</th><td>{{ object.interfaces_existing }}</td></tr>
+        <tr><th scope="row">Interfaces ignored</th><td>{{ object.interfaces_ignored }}</td></tr>
+        <tr><th scope="row">IPs created</th><td>{{ object.ips_created }}</td></tr>
+        <tr><th scope="row">IPs existing</th><td>{{ object.ips_existing }}</td></tr>
+      </table>
+    </div>
+  </div>
+</div>
+<div class="row">
+  <div class="col col-md-12">
+    <div class="card">
+      <h2 class="card-header">Message</h2>
+      <div class="card-body">
+        <pre>{{ object.message|placeholder }}</pre>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="row">
+  <div class="col col-md-12">
+    <div class="card">
+      <h2 class="card-header">Created objects <span class="badge text-bg-grey">{{ object.created_objects.count }}</span></h2>
+      <table class="table table-hover">
+        <thead><tr><th>Type</th><th>Object</th></tr></thead>
+        <tbody>
+          {% for o in object.created_objects.all %}
+          <tr><td>{{ o.object_type.name }}</td><td>{{ o.object_repr }}</td></tr>
+          {% empty %}
+          <tr><td colspan="2" class="text-muted">This run created no objects (compare/dry-run, or nothing new).</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}

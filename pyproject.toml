@@ -1,0 +1,30 @@
+# Packaging for the NetBox SNMP Sync plugin.
+# https://netboxlabs.com/docs/netbox/plugins/development/
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netbox-snmp-sync"
+version = "0.1.0"
+authors = [
+    { name = "Adrián Javorček", email = "adrian.javorcek@gmail.com" },
+]
+description = "Collect interfaces, IPs and VLANs from devices over SNMP and sync them into NetBox."
+readme = "README.md"
+requires-python = ">=3.12"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Framework :: Django",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+]
+dependencies = [
+    # SNMP collection (pysnmp 7.x, asyncio). NetBox itself supplies Django/ORM.
+    "pysnmp>=7.1,<8",
+]
+
+[tool.setuptools.packages.find]
+include = ["netbox_snmp_sync*"]
