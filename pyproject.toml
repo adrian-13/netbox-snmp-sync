@@ -31,7 +31,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://github.com/adrian-13/netbox-snmp-sync"
-Repository = "https://github.com/adrian-13/netbox-snmp-sync"
+Repository = "https://github.com/adrian-13/netbox-snmp-sync.git"
 Issues = "https://github.com/adrian-13/netbox-snmp-sync/issues"
 
 [tool.setuptools.packages.find]
