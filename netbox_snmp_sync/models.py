@@ -82,6 +82,10 @@ class DeviceSNMPConfig(NetBoxModel):
         help_text="NetBox interface type used when SNMP can't determine one. Blank = plugin default.",
     )
     skip_loopback_ips = models.BooleanField(default=True)
+    # result of the last manual "Test SNMP" (set by the test view, not user-editable)
+    last_test_time = models.DateTimeField(null=True, blank=True, editable=False)
+    last_tested_ok = models.BooleanField(null=True, blank=True, editable=False)
+    last_test_message = models.CharField(max_length=255, blank=True, editable=False)
 
     class Meta:
         ordering = ("device",)
@@ -90,6 +94,10 @@ class DeviceSNMPConfig(NetBoxModel):
 
     def __str__(self):
         return f"SNMP config for {self.device}"
+
+    @property
+    def last_test_color(self):
+        return "green" if self.last_tested_ok else "red"
 
     def get_absolute_url(self):
         return reverse("plugins:netbox_snmp_sync:devicesnmpconfig", args=[self.pk])
@@ -112,9 +120,9 @@ class DeviceSNMPConfig(NetBoxModel):
         return str(primary.address.ip) if primary else ""
 
     def to_spec(self) -> DeviceConfig:
-        """Build a collector ``DeviceConfig``, falling back to plugin defaults where blank."""
+        """Build a collector ``DeviceConfig``, falling back to global settings where blank."""
         def default(key):
-            return get_plugin_config(PLUGIN_NAME, key)
+            return get_setting(key)
 
         return DeviceConfig(
             target=self.target,
@@ -243,3 +251,63 @@ def record_created_objects(run: SyncRun, created_objects):
             object_id=obj.pk,
             object_repr=str(obj)[:200],
         )
+
+
+class SNMPSyncConfig(NetBoxModel):
+    """Singleton holding the plugin's global settings, editable in the UI (no restart needed).
+    Seeded once from PLUGINS_CONFIG / default_settings on first access."""
+
+    # scheduler
+    sync_interval_hours = models.PositiveIntegerField(
+        default=0, help_text="Hours between automatic syncs; 0 disables the scheduler.")
+    # sync behaviour
+    update_existing = models.BooleanField(default=False, help_text="Also overwrite changed fields on existing interfaces.")
+    set_mac_address = models.BooleanField(default=True)
+    write_vlans = models.BooleanField(default=False, help_text="Write per-interface VLAN membership.")
+    create_vlans = models.BooleanField(default=False, help_text="Auto-create missing VLANs in the device's site.")
+    # history retention (prune job)
+    history_keep_days = models.PositiveIntegerField(default=90)
+    history_keep_count = models.PositiveIntegerField(default=1000)
+
+    # Note: SNMP transport defaults (version/port/community/timeout/retries),
+    # skip_loopback_ips and default_ethernet_type live per-device on DeviceSNMPConfig;
+    # their ultimate fallback is the plugin's default_settings (via get_setting()).
+    _SEED_FIELDS = (
+        "sync_interval_hours", "update_existing", "set_mac_address",
+        "write_vlans", "create_vlans", "history_keep_days", "history_keep_count",
+    )
+
+    class Meta:
+        verbose_name = "SNMP Sync settings"
+        verbose_name_plural = "SNMP Sync settings"
+
+    def __str__(self):
+        return "SNMP Sync settings"
+
+    def get_absolute_url(self):
+        return reverse("plugins:netbox_snmp_sync:settings")
+
+    @classmethod
+    def get(cls):
+        """Return the singleton, creating it (seeded from PLUGINS_CONFIG) on first access."""
+        obj = cls.objects.first()
+        if obj is None:
+            seed = {}
+            for fname in cls._SEED_FIELDS:
+                try:
+                    val = get_plugin_config(PLUGIN_NAME, fname)
+                except Exception:
+                    val = None
+                if val is not None:
+                    seed[fname] = val
+            obj = cls.objects.create(**seed)
+        return obj
+
+
+def get_setting(name):
+    """Read a global setting from the DB singleton; fall back to PLUGINS_CONFIG for keys
+    that aren't stored on the model (e.g. SNMPv3 protocol defaults)."""
+    cfg = SNMPSyncConfig.get()
+    if hasattr(cfg, name):
+        return getattr(cfg, name)
+    return get_plugin_config(PLUGIN_NAME, name)

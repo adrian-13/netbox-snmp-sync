@@ -25,9 +25,11 @@ menu = PluginMenu(
                     link_text="Sync Runs",
                 ),
                 PluginMenuItem(
-                    link="plugins:netbox_snmp_sync:bulk_setup",
-                    link_text="Bulk setup",
+                    link="plugins:netbox_snmp_sync:settings",
+                    link_text="Settings",
                 ),
+                # 'Bulk setup' is intentionally not in the menu (reachable by direct URL:
+                # /plugins/snmp-sync/bulk-setup/). Use Device SNMP Configs → Import for bulk create.
             ),
         ),
     ),

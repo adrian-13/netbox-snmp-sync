@@ -1,0 +1,16 @@
+{% extends 'generic/object_list.html' %}
+{% load buttons %}
+
+{# Add a "Test selected" bulk action alongside the standard Edit/Delete Selected buttons.
+   The button submits the surrounding selection form (the checked pk checkboxes) to the
+   bulk-test view via formaction. #}
+{% block bulk_buttons %}
+  <div class="btn-list bulk-action-buttons">
+    <button type="submit" name="_test" formnovalidate
+            formaction="{% url 'plugins:netbox_snmp_sync:devicesnmpconfig_bulk_test' %}"
+            class="btn btn-cyan btn-sm">
+      <i class="mdi mdi-access-point-check"></i> Test selected
+    </button>
+    {% action_buttons actions model multi=True %}
+  </div>
+{% endblock %}

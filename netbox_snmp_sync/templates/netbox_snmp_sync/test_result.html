@@ -1,0 +1,68 @@
+{% extends 'base/layout.html' %}
+{% load helpers %}
+
+{% block title %}SNMP Test Result{{ results|length|pluralize }}{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col col-md-10">
+
+    {% if ok_count and fail_count %}
+      <div class="alert alert-warning" role="alert">
+        <i class="mdi mdi-alert"></i>
+        Tested {{ results|length }} device{{ results|length|pluralize }}:
+        <strong>{{ ok_count }} OK</strong>, <strong>{{ fail_count }} failed</strong>.
+      </div>
+    {% elif fail_count %}
+      <div class="alert alert-danger" role="alert">
+        <i class="mdi mdi-alert-circle"></i>
+        {% if results|length > 1 %}Tested {{ results|length }} devices — all {{ fail_count }} failed.
+        {% else %}SNMP test <strong>failed</strong>.{% endif %}
+      </div>
+    {% else %}
+      <div class="alert alert-success" role="alert">
+        <i class="mdi mdi-check-circle"></i>
+        {% if results|length > 1 %}Tested {{ results|length }} devices — all OK.
+        {% else %}SNMP test <strong>passed</strong>.{% endif %}
+      </div>
+    {% endif %}
+
+    <div class="card">
+      <h2 class="card-header">SNMP test result{{ results|length|pluralize }}</h2>
+      <table class="table table-hover object-list">
+        <thead>
+          <tr>
+            <th>Device</th>
+            <th>Target</th>
+            <th>Result</th>
+            <th>Details</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in results %}
+          <tr>
+            <td>{{ r.device|linkify }}</td>
+            <td>{{ r.target|placeholder }}</td>
+            <td>
+              {% if r.ok %}
+                <span class="badge text-bg-success">OK</span>
+              {% else %}
+                <span class="badge text-bg-danger">Failed</span>
+              {% endif %}
+            </td>
+            <td><span class="text-muted">{{ r.message }}</span></td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+
+    <div class="mt-3">
+      <a href="{{ return_url }}" class="btn btn-primary">
+        <i class="mdi mdi-arrow-left"></i> Back
+      </a>
+    </div>
+
+  </div>
+</div>
+{% endblock %}

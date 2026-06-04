@@ -16,7 +16,6 @@ from core.choices import JobIntervalChoices
 from core.exceptions import JobFailed
 from netbox.context_managers import event_tracking
 from netbox.jobs import JobRunner, system_job
-from netbox.plugins import get_plugin_config
 from utilities.request import NetBoxFakeRequest
 
 from . import engine
@@ -48,7 +47,7 @@ def _sync_one(config, *, mode, trigger, logger=None, user=None):
     Raises ``JobFailed`` on a hard failure (no target / SNMP error) after recording a failed
     SyncRun, so callers can either let the job error (manual) or catch and continue (scheduled).
     """
-    from .models import SyncRun, record_created_objects
+    from .models import SyncRun, get_setting, record_created_objects
 
     device = config.device
     spec = config.to_spec()
@@ -82,10 +81,10 @@ def _sync_one(config, *, mode, trigger, logger=None, user=None):
             result = engine.apply_sync(
                 device, data,
                 dry_run=(mode == SyncModeChoices.DRY_RUN),
-                update_existing=bool(get_plugin_config("netbox_snmp_sync", "update_existing")),
-                set_mac_address=bool(get_plugin_config("netbox_snmp_sync", "set_mac_address")),
-                write_vlans=bool(get_plugin_config("netbox_snmp_sync", "write_vlans")),
-                create_vlans=bool(get_plugin_config("netbox_snmp_sync", "create_vlans")),
+                update_existing=bool(get_setting("update_existing")),
+                set_mac_address=bool(get_setting("set_mac_address")),
+                write_vlans=bool(get_setting("write_vlans")),
+                create_vlans=bool(get_setting("create_vlans")),
             )
         verb = "would create" if mode == SyncModeChoices.DRY_RUN else "created"
         summary = (f"{verb} {result.interfaces_created} interfaces, {result.ips_created} IPs; "
@@ -124,10 +123,11 @@ class SNMPSyncJob(JobRunner):
         from .models import DeviceSNMPConfig
 
         mode = kwargs.get("mode", SyncModeChoices.COMPARE)
+        trigger = kwargs.get("trigger", SyncTriggerChoices.MANUAL)
         config = self.job.object
         if config is None:
             config = DeviceSNMPConfig.objects.get(pk=kwargs["config_pk"])
-        return _sync_one(config, mode=mode, trigger=SyncTriggerChoices.MANUAL,
+        return _sync_one(config, mode=mode, trigger=trigger,
                          logger=self.logger, user=self.job.user)
 
 
@@ -137,15 +137,15 @@ class ScheduledSNMPSyncJob(JobRunner):
         name = "Scheduled SNMP Sync"
 
     def run(self, *args, **kwargs):
-        from .models import DeviceSNMPConfig, SyncRun
+        from .models import DeviceSNMPConfig, SyncRun, get_setting
 
-        hours = get_plugin_config("netbox_snmp_sync", "sync_interval_hours") or 0
+        hours = get_setting("sync_interval_hours") or 0
         if hours <= 0:
             self.logger.info("Scheduled SNMP sync is disabled (sync_interval_hours = 0).")
             return
 
         cutoff = timezone.now() - timedelta(hours=hours)
-        due = 0
+        queued = 0
         for config in DeviceSNMPConfig.objects.filter(enabled=True).select_related("device"):
             if not config.target:
                 continue
@@ -160,14 +160,18 @@ class ScheduledSNMPSyncJob(JobRunner):
             )
             if last and last.created > cutoff:
                 continue
-            due += 1
-            try:
-                _sync_one(config, mode=SyncModeChoices.APPLY, trigger=SyncTriggerChoices.SCHEDULED,
-                          logger=self.logger, user=self.job.user)
-            except Exception as exc:  # noqa: BLE001
-                self.logger.warning(f"{config.device}: scheduled sync failed: {exc}")
+            # Enqueue an isolated per-device job rather than syncing inline: one slow/hung
+            # device no longer blocks the rest, failures are isolated, and the work spreads
+            # across however many RQ workers are running.
+            SNMPSyncJob.enqueue(
+                config_pk=config.pk,
+                mode=SyncModeChoices.APPLY,
+                trigger=SyncTriggerChoices.SCHEDULED,
+                user=self.job.user,
+            )
+            queued += 1
 
-        self.logger.info(f"Scheduled SNMP sync: processed {due} due device(s) (interval {hours}h).")
+        self.logger.info(f"Scheduled SNMP sync: queued {queued} due device(s) (interval {hours}h).")
 
 
 @system_job(interval=JobIntervalChoices.INTERVAL_DAILY)
@@ -178,10 +182,10 @@ class PruneSyncRunsJob(JobRunner):
         name = "Prune SNMP Sync history"
 
     def run(self, *args, **kwargs):
-        from .models import SyncRun
+        from .models import SyncRun, get_setting
 
-        keep_days = get_plugin_config("netbox_snmp_sync", "history_keep_days") or 0
-        keep_count = get_plugin_config("netbox_snmp_sync", "history_keep_count") or 0
+        keep_days = get_setting("history_keep_days") or 0
+        keep_count = get_setting("history_keep_count") or 0
         before = SyncRun.objects.count()
 
         if keep_days > 0:

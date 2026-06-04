@@ -4,6 +4,9 @@
     SNMP Sync
     {% if snmp_config %}
     <div class="card-actions">
+      <a href="{% url 'plugins:netbox_snmp_sync:devicesnmpconfig_test' pk=snmp_config.pk %}" class="btn btn-sm btn-cyan">
+        <i class="mdi mdi-access-point-check"></i> Test SNMP
+      </a>
       <a href="{% url 'plugins:netbox_snmp_sync:devicesnmpconfig_preview' pk=snmp_config.pk %}" class="btn btn-sm btn-success">
         <i class="mdi mdi-magnify-scan"></i> Preview &amp; write
       </a>
@@ -29,6 +32,13 @@
     <tr><th scope="row">Port</th><td>{{ snmp_config.port }}</td></tr>
     <tr><th scope="row">Community</th><td>{{ snmp_config.community|placeholder }}</td></tr>
     <tr><th scope="row">Target</th><td>{{ snmp_config.target|placeholder }}</td></tr>
+    <tr><th scope="row">Last test</th><td>
+      {% if snmp_config.last_test_time %}
+        <span class="badge text-bg-{{ snmp_config.last_test_color }}">{% if snmp_config.last_tested_ok %}OK{% else %}Failed{% endif %}</span>
+        {{ snmp_config.last_test_time }}
+        <div><small class="text-muted">{{ snmp_config.last_test_message }}</small></div>
+      {% else %}<span class="text-muted">never tested</span>{% endif %}
+    </td></tr>
   </table>
   {% else %}
   <div class="card-body">

@@ -1,11 +1,14 @@
 import asyncio
 import json
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 from django.contrib import messages
 from django.contrib.auth.mixins import LoginRequiredMixin
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils import timezone
+from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.generic import View
 
 from netbox.plugins import get_plugin_config
@@ -16,7 +19,7 @@ from . import engine, filtersets, forms, tables
 from .choices import SyncModeChoices, SyncStatusChoices, SyncTriggerChoices
 from .dto import deserialize_device_data, serialize_device_data
 from .jobs import SNMPSyncJob
-from .models import DeviceSNMPConfig, SyncRun, record_created_objects
+from .models import DeviceSNMPConfig, SNMPSyncConfig, SyncRun, record_created_objects
 from .snmp_collector import collect_with_ping
 
 
@@ -30,11 +33,56 @@ def _collect_blocking(spec):
         return ex.submit(lambda: asyncio.run(collect_with_ping(spec))).result()
 
 
+def _evaluate(spec):
+    """Network-only SNMP probe of an already-resolved spec. Returns ``(ok, message)``.
+
+    Touches no ORM state, so it is safe to run from a worker thread for bulk testing.
+    """
+    if not spec.target:
+        return False, "No SNMP target (set a primary IP or target override)."
+    t0 = time.monotonic()
+    try:
+        data = _collect_blocking(spec)
+    except Exception as exc:  # noqa: BLE001
+        return False, f"{spec.target}: {exc}"
+    elapsed = time.monotonic() - t0
+    return True, (
+        f"sysName={data.sys_name or '—'}, vendor={data.vendor or '—'}, "
+        f"{len(data.interfaces)} interfaces, {len(data.ip_addresses)} IPs, "
+        f"{len(data.vlans)} VLANs ({elapsed:.1f}s)"
+    )
+
+
+def _persist_test(config, ok, message):
+    """Store the last-test result on the config (so the list column / device panel reflect it)
+    and return a result dict for the result page."""
+    config.last_test_time = timezone.now()
+    config.last_tested_ok = ok
+    config.last_test_message = message[:255]
+    config.save()
+    return {"device": config.device, "target": config.target, "ok": ok, "message": message}
+
+
+def _run_test(config):
+    """Resolve the spec (DB read), probe over SNMP, persist + return the result. Main-thread use."""
+    ok, message = _evaluate(config.to_spec())
+    return _persist_test(config, ok, message)
+
+
+def _safe_referer(request):
+    """Return the HTTP referer if it points back at this NetBox instance, else None."""
+    ref = request.META.get("HTTP_REFERER")
+    if ref and url_has_allowed_host_and_scheme(ref, allowed_hosts={request.get_host()}):
+        return ref
+    return None
+
+
 @register_model_view(DeviceSNMPConfig, name="list", path="", detail=False)
 class DeviceSNMPConfigListView(generic.ObjectListView):
     queryset = DeviceSNMPConfig.objects.all()
     table = tables.DeviceSNMPConfigTable
     filterset = filtersets.DeviceSNMPConfigFilterSet
+    template_name = "netbox_snmp_sync/device_snmp_config_list.html"
 
 
 @register_model_view(DeviceSNMPConfig)
@@ -52,6 +100,27 @@ class DeviceSNMPConfigEditView(generic.ObjectEditView):
 @register_model_view(DeviceSNMPConfig, name="delete")
 class DeviceSNMPConfigDeleteView(generic.ObjectDeleteView):
     queryset = DeviceSNMPConfig.objects.all()
+
+
+@register_model_view(DeviceSNMPConfig, "bulk_import", detail=False)
+class DeviceSNMPConfigBulkImportView(generic.BulkImportView):
+    queryset = DeviceSNMPConfig.objects.all()
+    model_form = forms.DeviceSNMPConfigImportForm
+
+
+@register_model_view(DeviceSNMPConfig, "bulk_edit", path="edit", detail=False)
+class DeviceSNMPConfigBulkEditView(generic.BulkEditView):
+    queryset = DeviceSNMPConfig.objects.all()
+    filterset = filtersets.DeviceSNMPConfigFilterSet
+    table = tables.DeviceSNMPConfigTable
+    form = forms.DeviceSNMPConfigBulkEditForm
+
+
+@register_model_view(DeviceSNMPConfig, "bulk_delete", path="delete", detail=False)
+class DeviceSNMPConfigBulkDeleteView(generic.BulkDeleteView):
+    queryset = DeviceSNMPConfig.objects.all()
+    filterset = filtersets.DeviceSNMPConfigFilterSet
+    table = tables.DeviceSNMPConfigTable
 
 
 @register_model_view(DeviceSNMPConfig, name="sync")
@@ -73,6 +142,71 @@ class DeviceSNMPConfigSyncView(LoginRequiredMixin, View):
         job = SNMPSyncJob.enqueue(config_pk=config.pk, user=request.user, mode=mode)
         messages.success(request, f"Queued SNMP '{mode}' for {config.device}.")
         return redirect(job.get_absolute_url())
+
+
+@register_model_view(DeviceSNMPConfig, name="test", path="test")
+class DeviceSNMPConfigTestView(LoginRequiredMixin, View):
+    """Quick read-only SNMP connectivity test for one device: poll it and render a result page
+    (OK/Failed + sysName, vendor, counts). Also persists the outcome on the config so the list
+    column / device panel show it. Writes nothing else to NetBox."""
+
+    def get(self, request, pk):
+        config = get_object_or_404(DeviceSNMPConfig, pk=pk)
+        if not request.user.has_perm("netbox_snmp_sync.view_devicesnmpconfig"):
+            messages.error(request, "You do not have permission to run an SNMP test.")
+            return redirect(config.get_absolute_url())
+
+        result = _run_test(config)
+        return render(request, "netbox_snmp_sync/test_result.html", {
+            "results": [result],
+            "ok_count": 1 if result["ok"] else 0,
+            "fail_count": 0 if result["ok"] else 1,
+            "return_url": _safe_referer(request) or config.device.get_absolute_url(),
+        })
+
+
+@register_model_view(DeviceSNMPConfig, "bulk_test", path="test", detail=False)
+class DeviceSNMPConfigBulkTestView(LoginRequiredMixin, View):
+    """Run a read-only SNMP test against every selected device's config at once and render a
+    combined result page. Each device's last-test result is persisted too (Last test column).
+
+    The probes run concurrently (bounded pool) and the collector quick-pings first, so even a
+    large selection — including unreachable devices — finishes promptly instead of timing out.
+    """
+
+    list_url = "plugins:netbox_snmp_sync:devicesnmpconfig_list"
+
+    def get(self, request):
+        return redirect(self.list_url)
+
+    def post(self, request):
+        if not request.user.has_perm("netbox_snmp_sync.view_devicesnmpconfig"):
+            messages.error(request, "You do not have permission to run an SNMP test.")
+            return redirect(self.list_url)
+
+        if request.POST.get("_all"):
+            qs = DeviceSNMPConfig.objects.all()
+        else:
+            qs = DeviceSNMPConfig.objects.filter(pk__in=request.POST.getlist("pk"))
+        configs = list(qs.select_related("device"))
+        if not configs:
+            messages.warning(request, "No SNMP configurations selected.")
+            return redirect(self.list_url)
+
+        # Resolve specs on the main thread (DB reads), probe concurrently (network I/O), then
+        # persist serially on the main thread (ORM writes).
+        specs = [(c, c.to_spec()) for c in configs]
+        with ThreadPoolExecutor(max_workers=min(8, len(specs))) as ex:
+            outcomes = list(ex.map(lambda pair: _evaluate(pair[1]), specs))
+
+        results = [_persist_test(c, ok, msg) for (c, _spec), (ok, msg) in zip(specs, outcomes)]
+        ok_count = sum(1 for r in results if r["ok"])
+        return render(request, "netbox_snmp_sync/test_result.html", {
+            "results": results,
+            "ok_count": ok_count,
+            "fail_count": len(results) - ok_count,
+            "return_url": reverse(self.list_url),
+        })
 
 
 @register_model_view(DeviceSNMPConfig, name="preview", path="preview")
@@ -167,6 +301,16 @@ class SyncRunDeleteView(generic.ObjectDeleteView):
 class SyncRunBulkDeleteView(generic.BulkDeleteView):
     queryset = SyncRun.objects.all()
     table = tables.SyncRunTable
+
+
+class SNMPSyncSettingsView(generic.ObjectEditView):
+    """Edit the plugin's global settings singleton (SNMP Sync → Settings)."""
+
+    queryset = SNMPSyncConfig.objects.all()
+    form = forms.SNMPSyncConfigForm
+
+    def get_object(self, **kwargs):
+        return SNMPSyncConfig.get()
 
 
 class BulkSNMPConfigView(LoginRequiredMixin, View):

@@ -22,4 +22,5 @@ urlpatterns = [
         include(get_model_urls("netbox_snmp_sync", "syncrun")),
     ),
     path("bulk-setup/", views.BulkSNMPConfigView.as_view(), name="bulk_setup"),
+    path("settings/", views.SNMPSyncSettingsView.as_view(), name="settings"),
 ]
