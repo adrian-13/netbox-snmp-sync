@@ -14,9 +14,12 @@ authors = [
 description = "Collect interfaces, IPs and VLANs from devices over SNMP and sync them into NetBox."
 readme = "README.md"
 requires-python = ">=3.12"
+license = { text = "MIT" }
+keywords = ["netbox", "netbox-plugin", "snmp", "network-automation", "ipam", "dcim"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Framework :: Django",
+    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -25,6 +28,11 @@ dependencies = [
     # SNMP collection (pysnmp 7.x, asyncio). NetBox itself supplies Django/ORM.
     "pysnmp>=7.1,<8",
 ]
+
+[project.urls]
+Homepage = "https://github.com/adrian-13/netbox-snmp-sync"
+Repository = "https://github.com/adrian-13/netbox-snmp-sync"
+Issues = "https://github.com/adrian-13/netbox-snmp-sync/issues"
 
 [tool.setuptools.packages.find]
 include = ["netbox_snmp_sync*"]
