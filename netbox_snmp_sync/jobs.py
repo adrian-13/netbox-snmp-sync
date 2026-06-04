@@ -131,6 +131,15 @@ class SNMPSyncJob(JobRunner):
                          logger=self.logger, user=self.job.user)
 
 
+def _parse_hours(raw):
+    """Parse a comma-separated hour list ('3,15') into a set of valid ints in 0–23."""
+    out = set()
+    for part in str(raw or "").replace(" ", "").split(","):
+        if part.isdigit() and 0 <= int(part) <= 23:
+            out.add(int(part))
+    return out
+
+
 @system_job(interval=JobIntervalChoices.INTERVAL_HOURLY)
 class ScheduledSNMPSyncJob(JobRunner):
     class Meta:
@@ -140,11 +149,33 @@ class ScheduledSNMPSyncJob(JobRunner):
         from .models import DeviceSNMPConfig, SyncRun, get_setting
 
         hours = get_setting("sync_interval_hours") or 0
-        if hours <= 0:
-            self.logger.info("Scheduled SNMP sync is disabled (sync_interval_hours = 0).")
+        allowed_hours = _parse_hours(get_setting("sync_at_hours"))
+
+        # The scheduler is on if either an interval or specific hours are configured.
+        if hours <= 0 and not allowed_hours:
+            self.logger.info("Scheduled SNMP sync is disabled (no interval and no hours set).")
             return
 
-        cutoff = timezone.now() - timedelta(hours=hours)
+        now = timezone.now()
+
+        if allowed_hours:
+            # Fixed-hour mode: only act during the configured hour(s). This system job wakes
+            # once per hour, so a short dedup window prevents a duplicate run in the same hour
+            # while tolerating timing jitter; the interval is ignored in this mode.
+            if now.hour not in allowed_hours:
+                self.logger.info(
+                    f"Hour {now.hour:02d}:xx is not a scheduled sync hour "
+                    f"({sorted(allowed_hours)}); nothing to do."
+                )
+                return
+            cutoff = now - timedelta(minutes=90)
+            mode_desc = f"at hour(s) {sorted(allowed_hours)}"
+        else:
+            # Interval mode: a device is due when its last successful scheduled sync is older
+            # than sync_interval_hours.
+            cutoff = now - timedelta(hours=hours)
+            mode_desc = f"interval {hours}h"
+
         queued = 0
         for config in DeviceSNMPConfig.objects.filter(enabled=True).select_related("device"):
             if not config.target:
@@ -171,7 +202,7 @@ class ScheduledSNMPSyncJob(JobRunner):
             )
             queued += 1
 
-        self.logger.info(f"Scheduled SNMP sync: queued {queued} due device(s) (interval {hours}h).")
+        self.logger.info(f"Scheduled SNMP sync ({mode_desc}): queued {queued} due device(s).")
 
 
 @system_job(interval=JobIntervalChoices.INTERVAL_DAILY)

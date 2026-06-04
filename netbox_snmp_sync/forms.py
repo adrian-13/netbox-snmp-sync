@@ -78,7 +78,7 @@ class SNMPSyncConfigForm(NetBoxModelForm):
     class Meta:
         model = SNMPSyncConfig
         fields = (
-            "sync_interval_hours",
+            "sync_interval_hours", "sync_at_hours",
             "update_existing", "set_mac_address", "write_vlans", "create_vlans",
             "history_keep_days", "history_keep_count",
         )
@@ -87,6 +87,24 @@ class SNMPSyncConfigForm(NetBoxModelForm):
         super().__init__(*args, **kwargs)
         # Tags are meaningless for a settings singleton.
         self.fields.pop("tags", None)
+
+    def clean_sync_at_hours(self):
+        """Validate and normalise the comma-separated hour list (0–23)."""
+        raw = (self.cleaned_data.get("sync_at_hours") or "").strip()
+        if not raw:
+            return ""
+        hours = []
+        for part in raw.replace(" ", "").split(","):
+            if not part:
+                continue
+            if not part.isdigit() or not (0 <= int(part) <= 23):
+                raise forms.ValidationError(
+                    f"'{part}' is not a valid hour. Use whole numbers 0–23, "
+                    f"comma-separated (e.g. '3' or '3,15')."
+                )
+            hours.append(int(part))
+        # Canonical form: unique, sorted.
+        return ",".join(str(h) for h in sorted(set(hours)))
 
 
 class BulkSNMPConfigForm(forms.Form):

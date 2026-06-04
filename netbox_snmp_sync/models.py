@@ -259,7 +259,13 @@ class SNMPSyncConfig(NetBoxModel):
 
     # scheduler
     sync_interval_hours = models.PositiveIntegerField(
-        default=0, help_text="Hours between automatic syncs; 0 disables the scheduler.")
+        default=0, help_text="Hours between automatic syncs; 0 disables the interval scheduler "
+                             "(unless specific hours are set below).")
+    sync_at_hours = models.CharField(
+        max_length=64, blank=True, verbose_name="Sync at hours",
+        help_text="Run automatic syncs only at these hours of the day (0–23, comma-separated, "
+                  "e.g. '3' or '3,15'). Blank = use the interval above at any hour. When set, "
+                  "the interval is ignored and syncs run during these hours.")
     # sync behaviour
     update_existing = models.BooleanField(default=False, help_text="Also overwrite changed fields on existing interfaces.")
     set_mac_address = models.BooleanField(default=True)
@@ -273,7 +279,7 @@ class SNMPSyncConfig(NetBoxModel):
     # skip_loopback_ips and default_ethernet_type live per-device on DeviceSNMPConfig;
     # their ultimate fallback is the plugin's default_settings (via get_setting()).
     _SEED_FIELDS = (
-        "sync_interval_hours", "update_existing", "set_mac_address",
+        "sync_interval_hours", "sync_at_hours", "update_existing", "set_mac_address",
         "write_vlans", "create_vlans", "history_keep_days", "history_keep_count",
     )
 

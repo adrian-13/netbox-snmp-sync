@@ -212,7 +212,9 @@ PLUGINS_CONFIG = {
         "create_vlans": False,  # auto-create missing VLANs in the device's site
 
         # ── Scheduler ───────────────────────────────────────────────────────────────
-        "sync_interval_hours": 24,  # 0 = scheduler disabled
+        "sync_interval_hours": 24,  # 0 = interval scheduler disabled
+        "sync_at_hours": "",        # e.g. "3" or "3,15" → run only at those hours of the
+                                    # day (interval is then ignored). Blank = use interval.
 
         # ── History retention (SyncRun pruning) ─────────────────────────────────────
         "history_keep_days":  90,
@@ -265,10 +267,18 @@ reverted, the **Revert run** button is available.
 
 ### 5 — Automatic sync
 
-Set `sync_interval_hours` to a positive integer in Settings. The built-in hourly system job
-checks every enabled device configuration and queues a sync for devices that have not had a
-successful scheduled sync within the configured window. Each device gets its own isolated
-RQ job — a slow or unreachable device does not block the others.
+There are two scheduling modes, both configured at **SNMP Sync → Settings**:
+
+- **Interval mode** — set `sync_interval_hours` to a positive integer. The hourly system job
+  queues a sync for every enabled device that has not had a successful scheduled sync within
+  the configured window (e.g. every 24 h).
+- **Fixed-hour mode** — set **Sync at hours** to one or more hours of the day (0–23,
+  comma-separated, e.g. `3` or `3,15`). Syncs then run only during those hours (e.g. daily at
+  03:00). When set, the interval is ignored.
+
+Newly added device configurations are picked up automatically on the next scheduler run — no
+restart or manual step needed. Each device gets its own isolated RQ job, so a slow or
+unreachable device does not block the others.
 
 ---
 
@@ -360,6 +370,13 @@ No internal NetBox code is imported directly.
 ---
 
 ## Changelog
+
+### v0.3.0
+- **Fixed-hour scheduling** — new **Sync at hours** setting (0–23, comma-separated). Scheduled
+  syncs can now run at specific hours of the day (e.g. daily at 03:00) instead of only on a
+  rolling interval. Blank keeps the existing interval behaviour; when set, the interval is
+  ignored. Input is validated and normalised in the Settings form.
+- Migration: 0007 (`sync_at_hours` field)
 
 ### v0.2.0
 - **Test SNMP result page** — full OK/Failed page instead of a toast message that was
