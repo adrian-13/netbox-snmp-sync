@@ -1,8 +1,8 @@
 # netbox-snmp-sync
 
-> **NetBox plugin** — číta rozhrania, IP adresy a VLAN-y zo sieťových zariadení cez **SNMP**
-> a synchronizuje ich priamo do NetBoxu. Celý workflow žije natívne v NetBox UI bez
-> akéhokoľvek externého skriptu alebo cronu.
+> A **NetBox plugin** that reads interfaces, IP addresses, and VLANs from network devices
+> over **SNMP** and synchronises them directly into NetBox — entirely from within the
+> NetBox UI, with no external scripts, cron jobs, or second tools required.
 
 [![NetBox](https://img.shields.io/badge/NetBox-4.6%2B-blue)](https://github.com/netbox-community/netbox)
 [![Python](https://img.shields.io/badge/Python-3.12%2B-blue)](https://python.org)
@@ -10,230 +10,392 @@
 
 ---
 
-## Obsah
+## Table of contents
 
-- [Čo plugin robí](#čo-plugin-robí)
-- [Funkcie](#funkcie)
-- [Požiadavky](#požiadavky)
-- [Inštalácia](#inštalácia)
-- [Konfigurácia](#konfigurácia)
-- [Použitie](#použitie)
+- [Overview](#overview)
+- [Features](#features)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Configuration](#configuration)
+- [Usage](#usage)
 - [REST API](#rest-api)
-- [Bezpečnosť](#bezpečnosť)
-- [Vývoj a testy](#vývoj-a-testy)
+- [Security](#security)
+- [Development & tests](#development--tests)
+- [Changelog](#changelog)
 
 ---
 
-## Čo plugin robí
+## Overview
 
-Sieťové zariadenie (router, switch) hovorí cez SNMP: aké má rozhrania, IP adresy, VLANy.
-Plugin tieto dáta prečíta a zapíše (alebo porovná) priamo do NetBoxu cez ORM — bez exportu,
-bez CSV, bez druhého nástroja. Celé to ovládaš z panela zariadenia alebo z menu SNMP Sync.
+Network devices speak SNMP: they expose their interfaces, IP addresses, VLANs, and system
+information through a standard protocol that has been around for decades. `netbox-snmp-sync`
+bridges that world with NetBox — it polls a device over SNMP, computes a diff against what
+NetBox already knows, and either shows you the diff or writes the missing data directly through
+the NetBox ORM.
+
+Everything runs natively inside NetBox:
 
 ```
-Zariadenie (SNMP) ──► SNMP zber ──► Engine (diff / apply) ──► NetBox ORM
-                                                         └──► Changelog, História, Revert
+Device (SNMP)
+      │
+      ▼
+SNMP collector (asyncio + pysnmp)
+      │
+      ▼
+Diff engine  ──►  Preview page (pick what to write)
+      │       ──►  Compare job  (read-only diff → job log)
+      │       ──►  Sync job     (add-only write to NetBox ORM)
+      │       ──►  Scheduled    (automatic periodic sync)
+      │
+      ▼
+NetBox ORM ──► Changelog (who / when / before → after)
+           ──► SyncRun   (history, statistics, revert)
 ```
 
----
-
-## Funkcie
-
-### Per-zariadenie SNMP nastavenia
-- SNMPv1 / v2c (community) aj **SNMPv3** (username + auth/priv protokol + kľúče)
-- Port, timeout, retries, target override (iný cieľ ako primárna IP)
-- Nastavenia žijú na karte zariadenia (pravý panel) aj v zozname SNMP Sync → Device SNMP Configs
-
-### Zbierané dáta
-- **Rozhrania** — názov, typ (odvodený z rýchlosti), MTU, rýchlosť, duplex, stav (admin/oper), popis, MAC adresa, rodičovský interface pre sub-interfaces
-- **IPv4 adresy** — s prefixovou dĺžkou, priradenie na interface
-- **VLAN membership** — tagged/untagged priradenie na interface (voliteľné)
-
-### Zápis / porovnanie
-| Akcia | Popis |
-|-------|-------|
-| **Test SNMP** | Rýchly ping + SNMP test dosahiteľnosti (nezmení NetBox). Zobrazí výsledkovú stránku s OK/Failed, uloží čas + správu do stĺpca *Last test* |
-| **Bulk test** | Test SNMP pre viacero vybraných zariadení naraz (paralelne) |
-| **Preview & write** | SNMP poll → zobrazí diff s checkboxmi → zapíše len vybraté |
-| **Compare** | SNMP poll → diff do logu background jobu (read-only) |
-| **Sync all** | SNMP poll → add-only zápis všetkých nových interface + IP |
-| **Scheduled sync** | Automatický sync podľa `sync_interval_hours` (systémový job) |
-
-### História a audit
-- **SyncRun** — každý beh (manuálny aj plánovaný) sa uloží do DB: štatistiky, stav, timestamp
-- **NetBox changelog** — všetky zápisy (aj z background jobov) sa zaznačia do NetBox audit logu (kto/kedy/čo, predtým→potom)
-- **Revert** — každý beh eviduje presne, ktoré objekty vytvoril; kliknutím **Revert run** sa tie objekty zmažú (mazanie je tiež v changelogu)
-
-### Nastavenia v UI
-- Globálne nastavenia pluginu (sync interval, update_existing, VLAN write/create, história) sú editovateľné priamo v NetBoxe cez SNMP Sync → Settings — bez reštartu
-
-### Bezpečnosť
-- SNMP tajomstvá (community, auth/priv kľúče) sú v REST API write-only (GET ich nevracia)
-- Permissioning cez štandardné NetBox oprávnenia
+The plugin is a successor to a standalone `netbox-snmp-sync` CLI tool. The SNMP collection
+and mapping logic is reused; the data is now written through Django ORM and the entire
+workflow lives in NetBox's UI and background-job framework.
 
 ---
 
-## Požiadavky
+## Features
 
-| Závislosť | Verzia |
-|-----------|--------|
-| NetBox | 4.6+ |
-| Python | 3.12+ |
+### Per-device SNMP settings
+
+Each device gets its own SNMP configuration, accessible from the device detail page
+(right-side panel) or from **SNMP Sync → Device SNMP Configs**:
+
+| Field | Description |
+|-------|-------------|
+| SNMP version | v1 / v2c / v3 |
+| Community string | SNMPv1 and v2c authentication |
+| SNMPv3 credentials | Username, auth protocol (MD5/SHA/SHA-224/256/384/512), auth key, priv protocol (DES/AES-128/192/256), priv key |
+| Port | Default 161 |
+| Timeout / retries | Per-device transport tuning |
+| Target override | Poll a different host/IP than the device's primary IP |
+
+### Collected data
+
+| Data | Details |
+|------|---------|
+| **Interfaces** | Name, type (derived from speed), MTU, speed, duplex, admin/oper status, description, MAC address, parent interface for sub-interfaces |
+| **IPv4 addresses** | With prefix length, assigned to the correct interface |
+| **VLAN membership** | Tagged and untagged VLAN assignments per interface (optional) |
+| **System info** | sysName, vendor, used in the test result and job logs |
+
+### Actions
+
+| Action | What it does |
+|--------|-------------|
+| **Test SNMP** | Quick connectivity probe (ICMP ping + SNMP poll). Renders a full result page showing OK / Failed, sysName, vendor, interface / IP / VLAN counts. Saves the outcome to the *Last test* column — no NetBox data is changed. |
+| **Bulk test** | Select multiple configs in the list → **Test selected** → probes all of them concurrently (worker pool of 8) and renders a combined result page. |
+| **Preview & write** | Full SNMP poll → diff page with checkboxes → writes only the items you select. |
+| **Compare** | SNMP poll → diff written to the background job log (read-only, nothing is changed). |
+| **Sync all** | SNMP poll → add-only write of all new interfaces and IPs to NetBox. |
+| **Scheduled sync** | System job that runs hourly and queues a per-device sync for every enabled device that has not been synced within the configured interval. |
+
+### History and audit
+
+- **SyncRun model** — every run (manual or scheduled) is stored in the database with:
+  - timestamp, trigger type (manual / scheduled), mode (compare / apply / dry-run)
+  - status (OK / failed)
+  - counters: interfaces created / updated / existing / ignored; IPs created / existing
+  - free-text message / error
+- **NetBox changelog integration** — all writes (including those from background jobs) are
+  wrapped in `event_tracking` so they appear in NetBox's built-in change log with the
+  correct user, timestamp, and before/after snapshots.
+- **Revert run** — each run records every object it created (`SyncRunObject`). Clicking
+  **Revert run** deletes exactly those objects. Deletions also land in the change log.
+
+### Global settings in the UI
+
+Plugin-level settings are stored in a database-backed singleton (`SNMPSyncConfig`) and
+editable at **SNMP Sync → Settings** without restarting NetBox:
+
+- Sync interval (hours), update existing objects, set MAC address
+- VLAN write / auto-create, history retention (days + count)
+
+### Bulk device setup
+
+**SNMP Sync → Bulk setup** lets you create SNMP configurations for many devices at once,
+optionally reading the community string from a custom field on each device.
+
+---
+
+## Requirements
+
+| Dependency | Version |
+|-----------|---------|
+| NetBox | 4.6 or newer |
+| Python | 3.12 or newer |
 | pysnmp | ≥ 7.1, < 8 |
-| Redis + RQ worker | štandardná NetBox prerekvizita |
+| Redis + RQ worker | Standard NetBox prerequisite (`netbox-rq` service) |
+
+> **Important:** The RQ worker (`netbox-rq`) must be running. Compare, Sync, and Scheduled
+> jobs are dispatched to the worker queue — without it they never execute.
 
 ---
 
-## Inštalácia
+## Installation
 
 ```bash
-# Z PyPI (po publikovaní)
-pip install netbox-snmp-sync
+# Activate the NetBox virtual environment
+source /opt/netbox/venv/bin/activate
 
-# Alebo priamo zo zdrojov
-pip install -e /path/to/netbox-snmp-sync
+# Install from GitHub
+pip install git+https://github.com/adrian-13/netbox-snmp-sync.git
+
+# Or from PyPI once published
+pip install netbox-snmp-sync
 ```
 
-V `configuration/plugins.py` (resp. `configuration.py`):
+Add the plugin to `configuration.py` (or `configuration/plugins.py` in netbox-docker):
 
 ```python
-PLUGINS = ["netbox_snmp_sync"]
+PLUGINS = [
+    "netbox_snmp_sync",
+]
 ```
 
-Migrácie a reštart:
+Run migrations and collect static files, then restart:
 
 ```bash
+cd /opt/netbox/netbox
 python manage.py migrate
-python manage.py collectstatic
-# Restart NetBox + RQ worker
+python manage.py collectstatic --no-input
+sudo systemctl restart netbox netbox-rq
 ```
 
-### Dev s netbox-docker
+### Verifying the installation
 
-Repozitár má `Dockerfile`, ktorý nabuildí NetBox image s pluginom nainštalovaným v
-editable móde + bind-mount zdrojového adresára pre živé úpravy bez rebuildu.
+```bash
+python manage.py showmigrations netbox_snmp_sync
+# All six migrations must show [X]
+```
+
+The **SNMP Sync** menu should now appear in the NetBox navigation bar, and every device
+detail page should show an **SNMP Sync** panel on the right side.
+
+### Development with netbox-docker
+
+The repository ships a `Dockerfile` that builds a NetBox image with the plugin installed
+in editable mode and a bind-mount of the source directory so live code changes take effect
+without a rebuild.
 
 ---
 
-## Konfigurácia
+## Configuration
+
+All values below can also be changed at runtime through **SNMP Sync → Settings** in the
+NetBox UI — no restart needed.
 
 ```python
 PLUGINS_CONFIG = {
     "netbox_snmp_sync": {
-        # SNMP transport defaulty (keď zariadenie nemá vlastné nastavenie)
-        "snmp_version": "2c",
-        "snmp_community": "public",
-        "snmp_port": 161,
-        "snmp_timeout": 2.0,
-        "snmp_retries": 1,
-        # Správanie
-        "default_ethernet_type": "1000base-t",
-        "set_mac_address": True,
-        "update_existing": False,   # True = prepisuj aj zmenené polia existujúcich objectov
-        "skip_loopback_ips": True,
-        # VLAN sync
-        "write_vlans": False,       # True = priraď VLANy na interface
-        "create_vlans": False,      # True = vytvor chýbajúce VLANy v site zariadenia
-        # Plánovač
-        "sync_interval_hours": 24,  # 0 = plánovač vypnutý
-        # História (SyncRun)
-        "history_keep_days": 90,
+        # ── SNMP transport defaults (used when a device has no per-device override) ──
+        "snmp_version":   "2c",      # "1" | "2c" | "3"
+        "snmp_community": "public",  # SNMPv1/v2c community string
+        "snmp_port":      161,
+        "snmp_timeout":   2.0,       # seconds per request
+        "snmp_retries":   1,
+
+        # ── Data mapping ────────────────────────────────────────────────────────────
+        "default_ethernet_type": "1000base-t",  # NetBox interface type when SNMP
+                                                 # cannot determine one
+        "set_mac_address":  True,   # populate the MAC address field on interfaces
+        "update_existing":  False,  # True = also overwrite changed fields on
+                                    # existing interfaces (default: add-only)
+        "skip_loopback_ips": True,  # skip 127.x.x.x addresses
+
+        # ── VLAN sync ───────────────────────────────────────────────────────────────
+        "write_vlans":  False,  # assign VLAN membership on interfaces
+        "create_vlans": False,  # auto-create missing VLANs in the device's site
+
+        # ── Scheduler ───────────────────────────────────────────────────────────────
+        "sync_interval_hours": 24,  # 0 = scheduler disabled
+
+        # ── History retention (SyncRun pruning) ─────────────────────────────────────
+        "history_keep_days":  90,
         "history_keep_count": 1000,
     },
 }
 ```
 
-> **Tip:** Všetky tieto nastavenia môžeš po prvom spustení zmeniť priamo v NetBoxe cez
-> **SNMP Sync → Settings** bez reštartu servera.
-
 ---
 
-## Použitie
+## Usage
 
-### 1. Pridaj SNMP konfiguráciu k zariadeniu
+### 1 — Add an SNMP configuration to a device
 
-Otvor **Devices → zariadenie → panel „SNMP Sync"** a klikni **Add**. Vyplň:
-- SNMP verzia (v2c / v3)
-- Community alebo SNMPv3 prihlasovacie údaje
-- Cieľ zberu = primárna IP zariadenia alebo **Target override**
+Open **Devices → \<device\> → SNMP Sync panel → Add**, or go to
+**SNMP Sync → Device SNMP Configs → Add** and select the device.
 
-### 2. Test spojenia
+Fill in the SNMP version and credentials. The poll target defaults to the device's primary
+IP; set **Target override** if you need to poll a management address instead.
 
-Klikni **Test SNMP** (pri ceruzke v zozname alebo na paneli zariadenia). Zobrazí sa výsledková
-stránka — OK s výpisom sysName/vendor/počty, alebo Failed s chybou. Výsledok sa uloží do
-stĺpca **Last test** a ostane viditeľný v zozname aj na paneli.
+### 2 — Test connectivity
 
-Pre viacero zariadení naraz: zaškrtni ich v zozname → **Test selected**.
+Click the **Test SNMP** button (the cyan icon next to the pencil in the list, or the button
+in the device panel). A result page is rendered immediately:
 
-### 3. Porovnaj alebo syncuj
+- ✅ **OK** — shows sysName, vendor, and counts of discovered interfaces / IPs / VLANs
+- ❌ **Failed** — shows the exact error (unreachable, wrong community, timeout, …)
 
-- **Preview & write** — interaktívny výber, čo sa má zapísať
-- **Compare** — len diff do logu jobu (nič nezapíše)
-- **Sync all** — add-only zápis všetkého nového
+The result is saved to the **Last test** column in the list and to the device panel, so you
+can see at a glance which devices are reachable.
 
-### 4. Pozri históriu
+To test multiple devices at once: check them in the list → click **Test selected** at the
+bottom. Results are shown in a single table.
 
-**SNMP Sync → Sync Runs** — každý beh s časom, typom, štatistikami. Ak chceš odvolať
-zmeny behu, klikni naň a daj **Revert run**.
+### 3 — Compare or sync
 
-### 5. Automatický sync
+| Button | Effect |
+|--------|--------|
+| **Preview & write** | Poll → diff page with checkboxes → write selected items |
+| **Compare** | Poll → diff written to the background job log only |
+| **Sync all** | Poll → add-only write of everything new to NetBox |
 
-Nastav `sync_interval_hours > 0` v Settings. Systémový job každú hodinu skontroluje, ktoré
-zariadenia neboli synchronizované za posledných N hodín, a zaradí ich do fronty RQ workera.
+All three dispatch a background job visible at **Jobs** in the NetBox admin area.
+
+### 4 — Review history
+
+**SNMP Sync → Sync Runs** lists every run with its timestamp, trigger, mode, status, and
+counters. Click a run to open the detail page. If the run created objects and has not been
+reverted, the **Revert run** button is available.
+
+### 5 — Automatic sync
+
+Set `sync_interval_hours` to a positive integer in Settings. The built-in hourly system job
+checks every enabled device configuration and queues a sync for devices that have not had a
+successful scheduled sync within the configured window. Each device gets its own isolated
+RQ job — a slow or unreachable device does not block the others.
 
 ---
 
 ## REST API
 
+The plugin exposes two endpoints, fully integrated with NetBox's DRF infrastructure
+(authentication, filtering, pagination, OpenAPI schema):
+
 ```
-GET/POST  /api/plugins/snmp-sync/device-snmp-configs/
-GET/PUT   /api/plugins/snmp-sync/device-snmp-configs/{id}/
-GET       /api/plugins/snmp-sync/sync-runs/
-GET       /api/plugins/snmp-sync/sync-runs/{id}/
+GET  /api/plugins/snmp-sync/device-snmp-configs/
+POST /api/plugins/snmp-sync/device-snmp-configs/
+GET  /api/plugins/snmp-sync/device-snmp-configs/{id}/
+PUT  /api/plugins/snmp-sync/device-snmp-configs/{id}/
+PATCH /api/plugins/snmp-sync/device-snmp-configs/{id}/
+DELETE /api/plugins/snmp-sync/device-snmp-configs/{id}/
+
+GET  /api/plugins/snmp-sync/sync-runs/
+GET  /api/plugins/snmp-sync/sync-runs/{id}/
 ```
 
-Swagger UI: `http://localhost:8000/api/schema/swagger-ui/` → sekcia `plugins`
+Interactive documentation is available at `/api/schema/swagger-ui/` under the `plugins` section.
 
 ---
 
-## Bezpečnosť
+## Security
 
-- **SNMP tajomstvá** (community, auth_key, priv_key) sú v REST API nastavené ako `write_only` —
-  `GET /api/plugins/snmp-sync/device-snmp-configs/` ich nevráti v odpovedi
-- Prístup k API aj UI kontrolujú štandardné **NetBox oprávnenia** (`view_devicesnmpconfig`, `add_devicesnmpconfig`, ...)
-- Tajomstvá sú v DB v čitateľnej podobe — obmedzuj prístup k DB a rotuj tokens
+| Concern | Mitigation |
+|---------|-----------|
+| SNMP secrets in the API | `community`, `auth_key`, and `priv_key` are declared `write_only` in the serializer — `GET` requests never return them |
+| SNMP secrets in the database | Stored in plain text (same as a `config.yaml`). Restrict DB access and rotate credentials regularly. |
+| Access control | All views and API endpoints respect standard NetBox permissions (`view_devicesnmpconfig`, `add_devicesnmpconfig`, `change_devicesnmpconfig`, `delete_devicesnmpconfig`) |
+| Production polling | The plugin only issues read-only SNMP GET/GETBULK requests — it never writes to devices |
 
 ---
 
-## Vývoj a testy
+## Development & tests
 
 ```bash
-# Testy (vrátane security testov)
+# Clone and install in editable mode
+git clone https://github.com/adrian-13/netbox-snmp-sync.git
+pip install -e netbox-snmp-sync/
+
+# Run the test suite
 export NETBOX_CONFIGURATION=netbox.configuration_testing
+cd /opt/netbox/netbox
 python manage.py test netbox_snmp_sync
 
-# Lokálny SNMP simulátor (snmpsim-lextudio)
-# Nastav target_override na adresu simulátora
+# Run a specific module
+python manage.py test netbox_snmp_sync.tests.test_api
+python manage.py test netbox_snmp_sync.tests.test_security
 ```
 
-Projekt využíva NetBox plugin API (verejné rozhranie): `NetBoxModel`, `NetBoxModelForm`,
+### Testing without a real device
+
+Use `snmpsim-lextudio` with the provided `*.snmprec` walk files:
+
+```bash
+pip install snmpsim-lextudio
+snmpsim-command-responder --data-dir=./snmprec --agent-udpv4-endpoint=127.0.0.1:1161
+```
+
+Then set **Target override** to `127.0.0.1` and **Port** to `1161` on a test SNMP config.
+
+### Project structure
+
+```
+netbox_snmp_sync/
+├── models.py          — DeviceSNMPConfig, SyncRun, SyncRunObject, SNMPSyncConfig
+├── views.py           — CRUD, Test, Bulk test, Preview, Sync, Settings, Revert
+├── jobs.py            — SNMPSyncJob, ScheduledSNMPSyncJob, PruneSyncRunsJob
+├── engine.py          — diff / apply logic (compare_device, apply_sync)
+├── snmp_collector.py  — async SNMP collection (pysnmp 7.x, asyncio)
+├── spec.py            — DeviceConfig dataclass
+├── dto.py             — serialise / deserialise collected data (preview snapshot)
+├── filtersets.py      — FilterSets for list views and API filtering
+├── forms.py           — ModelForms, BulkEditForm, BulkSNMPConfigForm
+├── tables.py          — django-tables2 table definitions
+├── serializers.py     — DRF serializers (secrets write_only)
+├── api/               — DRF viewsets and router
+├── graphql/           — Strawberry GraphQL types
+├── migrations/        — 0001 … 0006
+└── tests/             — test_api.py, test_filtersets.py, test_security.py
+```
+
+The plugin uses only **public NetBox plugin APIs**: `NetBoxModel`, `NetBoxModelForm`,
 `NetBoxTable`, `JobRunner`, `system_job`, `event_tracking`, `register_model_view`.
+No internal NetBox code is imported directly.
 
 ---
 
 ## Changelog
 
 ### v0.2.0
-- **Test SNMP** — výsledková stránka (OK/Failed + sysName, vendor, počty) namiesto toastu; výsledok sa ukladá do stĺpca *Last test*
-- **Bulk SNMP test** — vyber viacero zariadení → Test selected → súhrnná výsledková stránka (paralelný test, pool 8)
-- Globálne nastavenia editovateľné v UI (SNMP Sync → Settings)
-- Per-device scheduler — každé zariadenie sa syncuje samostatným RQ jobom (škálovateľnosť, izolácia chýb)
-- VLAN membership sync (write_vlans / create_vlans)
-- Changelog pre background joby (event_tracking + NetBoxFakeRequest)
-- Revert behu — evidencia vytvorených objektov, akcia Revert run
-- Bulk setup — hromadné založenie SNMP konfigurácií pre vybrané zariadenia
-- SNMP tajomstvá write-only v REST API
-- Security testy (17 testov)
+- **Test SNMP result page** — full OK/Failed page instead of a toast message that was
+  silently swallowed by the browser; last test time, status badge, and message are
+  persisted and shown in the list column and device panel
+- **Bulk SNMP test** — select multiple configs → *Test selected* → concurrent probes
+  (thread pool of 8), combined result page
+- **Global settings in UI** — `SNMPSyncConfig` singleton editable at SNMP Sync → Settings
+  without restarting NetBox
+- **Per-device scheduler** — `ScheduledSNMPSyncJob` enqueues one isolated `SNMPSyncJob`
+  per due device; a slow or unreachable device no longer blocks the queue
+- **VLAN membership sync** — writes tagged/untagged VLAN assignments; optionally
+  auto-creates missing VLANs in the device's site
+- **Changelog integration** — all ORM writes from background jobs are wrapped in
+  `event_tracking(NetBoxFakeRequest(...))` so they appear in NetBox's audit log
+- **Revert run** — `SyncRunObject` tracks created objects; *Revert run* deletes exactly
+  those objects; deletions are also recorded in the change log
+- **Bulk setup** — create SNMP configs for many devices at once, optionally reading the
+  community string from a custom field
+- **REST API secrets protection** — `community`, `auth_key`, `priv_key` are `write_only`
+  in the serializer
+- **Security tests** — 17 tests covering secret exposure, permission checks, job isolation
+- Migrations: 0004 (`SNMPSyncConfig`), 0005 (field cleanup), 0006 (`last_test_*` fields)
 
 ### v0.1.0
-- Počiatočný commit: základný SNMP zber, per-device konfigurácia, Compare/Sync joby, história SyncRun, REST API
+- Initial release: SNMP collection (pysnmp 7.x, asyncio), per-device configuration,
+  Compare / Sync background jobs, `SyncRun` history, REST API
+
+---
+
+## Contributing
+
+Pull requests are welcome. Please open an issue first to discuss the change, include tests
+for new functionality, and follow the existing code style (single quotes, 120-char line
+length, `ruff` for linting).
+
+## License
+
+[MIT](LICENSE)
