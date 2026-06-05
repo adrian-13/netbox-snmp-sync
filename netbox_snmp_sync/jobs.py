@@ -9,6 +9,7 @@ import asyncio
 import uuid
 from datetime import timedelta
 
+from django.contrib.auth import get_user_model
 from django.utils import timezone
 
 from core.choices import JobIntervalChoices
@@ -22,14 +23,32 @@ from .choices import SyncModeChoices, SyncStatusChoices, SyncTriggerChoices
 from .snmp_collector import collect_with_ping
 
 SCHEDULE_CHECK_INTERVAL_MINUTES = 5
+SYSTEM_USERNAME = "netbox-snmp-sync"
+
+
+def _system_user():
+    """Return a local service user for scheduled writes so NetBox change logging has a username."""
+    user_model = get_user_model()
+    user, created = user_model.objects.get_or_create(
+        username=SYSTEM_USERNAME,
+        defaults={
+            "email": "netbox-snmp-sync@example.invalid",
+            "is_active": False,
+        },
+    )
+    if created:
+        user.set_unusable_password()
+        user.save(update_fields=("password",))
+    return user
 
 
 def _fake_request(user):
     """A minimal request so ORM writes inside a job land in NetBox's change log.
 
     NetBox's change-logging signals read ``request.id`` and ``request.user`` from the active
-    request; jobs have none, so we synthesize one. ``user`` may be None for system/scheduled
-    runs (recorded as a system change)."""
+    request; jobs have none, so we synthesize one. Scheduled jobs use a disabled service user
+    because NetBox's ObjectChange model requires a username."""
+    user = user or _system_user()
     return NetBoxFakeRequest({
         "id": uuid.uuid4(),
         "user": user,

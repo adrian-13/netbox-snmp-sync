@@ -13,7 +13,7 @@ from ipam.models import VLAN, IPAddress
 from netbox_snmp_sync import engine
 from netbox_snmp_sync.dto import DeviceData, InterfaceData, IPAddressData, VlanData
 from netbox_snmp_sync.forms import DeviceSNMPConfigForm, SNMPSyncConfigForm
-from netbox_snmp_sync.jobs import ScheduledSNMPSyncJob, _collect_with_job_timeout
+from netbox_snmp_sync.jobs import SYSTEM_USERNAME, ScheduledSNMPSyncJob, _collect_with_job_timeout, _fake_request
 from netbox_snmp_sync.models import DeviceSNMPConfig, SNMPSyncConfig, SyncRun
 
 
@@ -156,6 +156,12 @@ class DeviceSNMPConfigTestCase(TestCase):
         with patch("netbox_snmp_sync.jobs.collect_with_ping", side_effect=slow_collect):
             with self.assertRaisesRegex(TimeoutError, "timed out after 0.01 seconds"):
                 asyncio.run(_collect_with_job_timeout(object(), 0.01))
+
+    def test_scheduled_fake_request_uses_service_user(self):
+        request = _fake_request(None)
+
+        self.assertEqual(request.user.username, SYSTEM_USERNAME)
+        self.assertFalse(request.user.is_active)
 
     def test_next_sync_uses_interval_setting(self):
         SNMPSyncConfig.objects.create(sync_interval_hours=8)
