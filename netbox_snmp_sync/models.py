@@ -8,10 +8,15 @@ turned into a collector ``DeviceConfig`` spec — merged with plugin-level defau
 Note: SNMP secrets (community, auth/priv keys) are stored in the database in clear text,
 matching the standalone tool's config.yaml. Restrict access via NetBox permissions.
 """
+from datetime import timedelta
+from uuid import UUID, uuid4
+
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.db import models
+from django.db.models import Q
 from django.urls import reverse
+from django.utils import timezone
 
 from netbox.models import NetBoxModel
 from netbox.plugins import get_plugin_config
@@ -27,6 +32,8 @@ from .choices import (
 from .spec import DeviceConfig
 
 PLUGIN_NAME = "netbox_snmp_sync"
+SCHEDULE_SPREAD_MAX_MINUTES = 15
+ACTIVE_JOB_STATUSES = {"pending", "scheduled", "running"}
 
 
 class DeviceSNMPConfig(NetBoxModel):
@@ -82,10 +89,34 @@ class DeviceSNMPConfig(NetBoxModel):
         help_text="NetBox interface type used when SNMP can't determine one. Blank = plugin default.",
     )
     skip_loopback_ips = models.BooleanField(default=True)
+    sync_interval_hours = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="Per-device hours between automatic syncs. Blank = use global setting; 0 disables interval sync "
+                  "for this device unless Sync at hours is set.",
+    )
+    sync_at_hours = models.CharField(
+        max_length=64,
+        blank=True,
+        verbose_name="Sync at hours",
+        help_text="Per-device sync hours (0-23, comma-separated). Blank = use global setting unless a per-device "
+                  "interval is set.",
+    )
     # result of the last manual "Test SNMP" (set by the test view, not user-editable)
     last_test_time = models.DateTimeField(null=True, blank=True, editable=False)
     last_tested_ok = models.BooleanField(null=True, blank=True, editable=False)
     last_test_message = models.CharField(max_length=255, blank=True, editable=False)
+    # scheduler state; SyncRun remains the immutable history, these fields make scheduling visible and deterministic
+    last_sync_at = models.DateTimeField(null=True, blank=True, editable=False)
+    last_sync_status = models.CharField(
+        max_length=10, choices=SyncStatusChoices, blank=True, editable=False
+    )
+    last_sync_message = models.CharField(max_length=255, blank=True, editable=False)
+    next_sync_at = models.DateTimeField(null=True, blank=True, editable=False)
+    consecutive_sync_failures = models.PositiveSmallIntegerField(default=0, editable=False)
+    sync_job_id = models.UUIDField(null=True, blank=True, editable=False)
+    sync_queued_at = models.DateTimeField(null=True, blank=True, editable=False)
+    sync_started_at = models.DateTimeField(null=True, blank=True, editable=False)
 
     class Meta:
         ordering = ("device",)
@@ -99,6 +130,76 @@ class DeviceSNMPConfig(NetBoxModel):
     def last_test_color(self):
         return "green" if self.last_tested_ok else "red"
 
+    @property
+    def last_sync_color(self):
+        return SyncStatusChoices.colors.get(self.last_sync_status)
+
+    @property
+    def is_sync_due(self):
+        return bool(self.enabled and self.next_sync_at and self.next_sync_at <= timezone.now())
+
+    @property
+    def is_retrying(self):
+        return self.last_sync_status == SyncStatusChoices.FAILED and self.consecutive_sync_failures > 0
+
+    @property
+    def sync_state(self):
+        if self.sync_started_at:
+            return "running"
+        if self.sync_queued_at:
+            return "queued"
+        if not self.is_schedule_enabled():
+            return "disabled"
+        if self.is_retrying:
+            return "retry_due" if self.is_sync_due else "retry"
+        if self.is_sync_due:
+            return "due"
+        return "waiting"
+
+    @property
+    def sync_state_label(self):
+        return {
+            "running": "Running",
+            "queued": "Queued",
+            "retry_due": "Retry due",
+            "retry": "Retry",
+            "due": "Due",
+            "disabled": "Disabled",
+            "waiting": "Waiting",
+        }.get(self.sync_state, "Waiting")
+
+    @property
+    def sync_state_color(self):
+        return {
+            "running": "blue",
+            "queued": "cyan",
+            "retry_due": "orange",
+            "retry": "red",
+            "due": "orange",
+            "disabled": "gray",
+            "waiting": "gray",
+        }.get(self.sync_state, "gray")
+
+    @property
+    def schedule_label(self):
+        if self.sync_at_hours:
+            return f"Hours {self.sync_at_hours}"
+        if self.sync_interval_hours is not None:
+            if self.sync_interval_hours == 0:
+                return "Disabled"
+            return f"Interval {self.sync_interval_hours}h"
+        return "Global"
+
+    @property
+    def schedule_color(self):
+        if self.sync_at_hours:
+            return "purple"
+        if self.sync_interval_hours is not None:
+            if self.sync_interval_hours == 0:
+                return "gray"
+            return "blue"
+        return "gray"
+
     def get_absolute_url(self):
         return reverse("plugins:netbox_snmp_sync:devicesnmpconfig", args=[self.pk])
 
@@ -110,6 +211,28 @@ class DeviceSNMPConfig(NetBoxModel):
                 raise ValidationError({"community": "A community string is required for SNMPv1/v2c."})
         elif version == "3" and not self.username:
             raise ValidationError({"username": "A username is required for SNMPv3."})
+        try:
+            self.sync_at_hours = normalize_sync_hours(self.sync_at_hours)
+        except ValidationError as exc:
+            raise ValidationError({"sync_at_hours": exc.messages}) from exc
+
+    def save(self, *args, **kwargs):
+        self.sync_at_hours = normalize_sync_hours(self.sync_at_hours)
+        old = None
+        if self.pk:
+            old = type(self).objects.filter(pk=self.pk).values(
+                "enabled", "sync_interval_hours", "sync_at_hours",
+            ).first()
+
+        super().save(*args, **kwargs)
+
+        created_without_next_sync = old is None and self.next_sync_at is None
+        schedule_changed = old is not None and any(
+            old[field] != getattr(self, field)
+            for field in ("enabled", "sync_interval_hours", "sync_at_hours")
+        )
+        if created_without_next_sync or schedule_changed:
+            self.reset_next_sync(timezone.now())
 
     @property
     def target(self) -> str:
@@ -140,10 +263,207 @@ class DeviceSNMPConfig(NetBoxModel):
             skip_loopback_ips=self.skip_loopback_ips,
         )
 
+    def get_effective_sync_interval_hours(self):
+        if self.sync_interval_hours is not None:
+            return self.sync_interval_hours
+        return get_setting("sync_interval_hours") or 0
+
+    def get_effective_sync_at_hours(self):
+        if self.sync_at_hours:
+            return self.sync_at_hours
+        if self.sync_interval_hours is not None:
+            return ""
+        return get_setting("sync_at_hours") or ""
+
+    def get_allowed_sync_hours(self):
+        return parse_sync_hours(self.get_effective_sync_at_hours())
+
+    def is_schedule_enabled(self):
+        return bool(self.enabled and (self.get_effective_sync_interval_hours() > 0 or self.get_allowed_sync_hours()))
+
+    def uses_global_schedule(self):
+        return self.sync_interval_hours is None and not self.sync_at_hours
+
+    def get_next_sync_time(self, reference=None, spread_offset=None):
+        """Return the next scheduled sync time from a reference point, or None when disabled."""
+        reference = reference or timezone.now()
+        spread_offset = spread_offset or timedelta()
+        hours = self.get_effective_sync_interval_hours()
+        allowed_hours = self.get_allowed_sync_hours()
+
+        if not self.is_schedule_enabled():
+            return None
+
+        if allowed_hours:
+            local_ref = timezone.localtime(reference)
+            candidates = []
+            for hour in allowed_hours:
+                candidate = local_ref.replace(hour=hour, minute=0, second=0, microsecond=0)
+                if candidate <= local_ref:
+                    candidate += timedelta(days=1)
+                candidates.append(candidate)
+            return min(candidates) + spread_offset
+
+        return reference + timedelta(hours=hours) + spread_offset
+
+    def get_retry_sync_time(self, reference=None):
+        """Return the next retry time after a failed scheduled sync."""
+        reference = reference or timezone.now()
+        if self.get_allowed_sync_hours():
+            return self.get_next_sync_time(reference)
+        if self.get_effective_sync_interval_hours() <= 0:
+            return None
+        delay_hours = min(2 ** max(self.consecutive_sync_failures - 1, 0), 24)
+        return reference + timedelta(hours=delay_hours)
+
+    def reset_next_sync(self, reference=None, save=True, spread_offset=None):
+        """Re-anchor this device's next scheduled sync to the current scheduler settings."""
+        self.next_sync_at = self.get_next_sync_time(reference, spread_offset=spread_offset)
+        if save and self.pk:
+            self.save(update_fields=("next_sync_at",))
+        return self.next_sync_at
+
+    @classmethod
+    def reset_all_next_sync(cls, reference=None, *, global_only=False):
+        """Re-anchor all configs and spread enabled devices over a short deterministic window."""
+        reference = reference or timezone.now()
+        configs = list(cls.objects.select_related("device").order_by("device__name", "pk"))
+        reset_configs = [
+            config for config in configs
+            if not global_only or config.uses_global_schedule()
+        ]
+        enabled_configs = [config for config in reset_configs if config.is_schedule_enabled()]
+        spread_window = get_schedule_spread_window(enabled_configs)
+        offsets = get_schedule_spread_offsets(len(enabled_configs), spread_window)
+        offsets_by_pk = {
+            config.pk: offset for config, offset in zip(enabled_configs, offsets)
+        }
+
+        for config in reset_configs:
+            config.reset_next_sync(
+                reference,
+                spread_offset=offsets_by_pk.get(config.pk, timedelta()),
+            )
+
+    def clear_stale_sync_job(self, reference=None, save=True):
+        """Clear a stuck queued/running marker once NetBox no longer has an active job for it."""
+        reference = reference or timezone.now()
+        if not self.sync_job_id:
+            return False
+
+        from core.models import Job
+
+        job_status = Job.objects.filter(job_id=self.sync_job_id).values_list("status", flat=True).first()
+        if job_status in ACTIVE_JOB_STATUSES:
+            return False
+        if job_status is not None:
+            self.clear_sync_job(save=save)
+            return True
+
+        cutoff = reference - timedelta(hours=2)
+        if (
+            (self.sync_started_at and self.sync_started_at < cutoff) or
+            (self.sync_queued_at and self.sync_queued_at < cutoff)
+        ):
+            self.clear_sync_job(save=save)
+            return True
+
+        return False
+
+    def has_active_sync_job(self, reference=None):
+        self.clear_stale_sync_job(reference)
+        return bool(self.sync_job_id)
+
+    def claim_sync_slot(self, reference=None):
+        """Atomically reserve this config before enqueueing a sync job."""
+        reference = reference or timezone.now()
+        self.clear_stale_sync_job(reference)
+        claim_id = uuid4()
+        updated = type(self).objects.filter(pk=self.pk, sync_job_id__isnull=True).update(
+            sync_job_id=claim_id,
+            sync_queued_at=reference,
+            sync_started_at=None,
+        )
+        if not updated:
+            return None
+        self.sync_job_id = claim_id
+        self.sync_queued_at = reference
+        self.sync_started_at = None
+        return claim_id
+
+    def mark_sync_queued(self, job_id, reference=None, save=True):
+        self.sync_job_id = UUID(str(job_id))
+        self.sync_queued_at = reference or timezone.now()
+        if save and self.pk:
+            type(self).objects.filter(pk=self.pk).update(
+                sync_job_id=self.sync_job_id,
+                sync_queued_at=self.sync_queued_at,
+            )
+            self.refresh_from_db(fields=("sync_job_id", "sync_queued_at", "sync_started_at"))
+
+    def mark_sync_started(self, job_id=None, reference=None, save=True):
+        reference = reference or timezone.now()
+        if job_id:
+            job_uuid = UUID(str(job_id))
+            self.sync_job_id = job_uuid
+        else:
+            job_uuid = self.sync_job_id
+        self.sync_started_at = reference
+        if self.sync_queued_at is None:
+            self.sync_queued_at = self.sync_started_at
+        if save and self.pk:
+            query = type(self).objects.filter(pk=self.pk)
+            if job_uuid:
+                query = query.filter(Q(sync_job_id=job_uuid) | Q(sync_job_id__isnull=True))
+            updated = query.update(
+                sync_job_id=job_uuid,
+                sync_queued_at=self.sync_queued_at,
+                sync_started_at=self.sync_started_at,
+            )
+            if not updated:
+                self.refresh_from_db(fields=("sync_job_id", "sync_queued_at", "sync_started_at"))
+                return False
+            self.refresh_from_db(fields=("sync_job_id", "sync_queued_at", "sync_started_at"))
+        return True
+
+    def clear_sync_job(self, save=True, job_id=None):
+        job_uuid = UUID(str(job_id)) if job_id else None
+        self.sync_job_id = None
+        self.sync_queued_at = None
+        self.sync_started_at = None
+        if save and self.pk:
+            query = type(self).objects.filter(pk=self.pk)
+            if job_uuid:
+                query = query.filter(sync_job_id=job_uuid)
+            updated = query.update(sync_job_id=None, sync_queued_at=None, sync_started_at=None)
+            if not updated:
+                self.refresh_from_db(fields=("sync_job_id", "sync_queued_at", "sync_started_at"))
+                return False
+        return True
+
+    def record_sync_result(self, run, *, update_schedule=False):
+        """Mirror the latest sync result on the config and optionally advance the schedule."""
+        self.last_sync_at = run.created
+        self.last_sync_status = run.status
+        self.last_sync_message = (run.message or "")[:255]
+
+        if run.status == SyncStatusChoices.OK:
+            self.consecutive_sync_failures = 0
+            if update_schedule:
+                self.next_sync_at = self.get_next_sync_time(run.created)
+        else:
+            self.consecutive_sync_failures += 1
+            if update_schedule:
+                self.next_sync_at = self.get_retry_sync_time(run.created)
+
+        self.save(update_fields=(
+            "last_sync_at", "last_sync_status", "last_sync_message",
+            "next_sync_at", "consecutive_sync_failures",
+        ))
+
 
 class SyncRun(NetBoxModel):
-    """A single SNMP sync run (history). Doubles as the source for the scheduler's
-    per-device "is this device due?" check."""
+    """A single SNMP sync run history row."""
 
     device = models.ForeignKey(
         to="dcim.Device",
@@ -266,6 +586,10 @@ class SNMPSyncConfig(NetBoxModel):
         help_text="Run automatic syncs only at these hours of the day (0–23, comma-separated, "
                   "e.g. '3' or '3,15'). Blank = use the interval above at any hour. When set, "
                   "the interval is ignored and syncs run during these hours.")
+    sync_job_timeout_seconds = models.PositiveIntegerField(
+        default=300,
+        help_text="Maximum runtime for the SNMP collection phase of a background sync job. 0 disables this guard.",
+    )
     # sync behaviour
     update_existing = models.BooleanField(default=False, help_text="Also overwrite changed fields on existing interfaces.")
     set_mac_address = models.BooleanField(default=True)
@@ -279,7 +603,7 @@ class SNMPSyncConfig(NetBoxModel):
     # skip_loopback_ips and default_ethernet_type live per-device on DeviceSNMPConfig;
     # their ultimate fallback is the plugin's default_settings (via get_setting()).
     _SEED_FIELDS = (
-        "sync_interval_hours", "sync_at_hours", "update_existing", "set_mac_address",
+        "sync_interval_hours", "sync_at_hours", "sync_job_timeout_seconds", "update_existing", "set_mac_address",
         "write_vlans", "create_vlans", "history_keep_days", "history_keep_count",
     )
 
@@ -317,3 +641,61 @@ def get_setting(name):
     if hasattr(cfg, name):
         return getattr(cfg, name)
     return get_plugin_config(PLUGIN_NAME, name)
+
+
+def parse_sync_hours(raw):
+    """Parse a comma-separated hour list ('3,15') into a set of valid ints in 0-23."""
+    out = set()
+    for part in str(raw or "").replace(" ", "").split(","):
+        if part.isdigit() and 0 <= int(part) <= 23:
+            out.add(int(part))
+    return out
+
+
+def normalize_sync_hours(raw):
+    raw = (raw or "").strip()
+    if not raw:
+        return ""
+    hours = []
+    for part in raw.replace(" ", "").split(","):
+        if not part:
+            continue
+        if not part.isdigit() or not (0 <= int(part) <= 23):
+            raise ValidationError(
+                f"'{part}' is not a valid hour. Use whole numbers 0-23, comma-separated."
+            )
+        hours.append(int(part))
+    return ",".join(str(hour) for hour in sorted(set(hours)))
+
+
+def get_schedule_spread_window(configs=None):
+    """Return the window used when re-anchoring many device schedules at once."""
+    if configs is not None:
+        windows = []
+        for config in configs:
+            if config.get_allowed_sync_hours():
+                windows.append(timedelta(minutes=SCHEDULE_SPREAD_MAX_MINUTES))
+                continue
+            hours = config.get_effective_sync_interval_hours()
+            if hours > 0:
+                windows.append(timedelta(minutes=min(SCHEDULE_SPREAD_MAX_MINUTES, max(hours * 60 - 1, 0))))
+        return min(windows) if windows else timedelta()
+
+    hours = get_setting("sync_interval_hours") or 0
+    allowed_hours = parse_sync_hours(get_setting("sync_at_hours"))
+    if hours <= 0 and not allowed_hours:
+        return timedelta()
+
+    if allowed_hours:
+        return timedelta(minutes=SCHEDULE_SPREAD_MAX_MINUTES)
+
+    return timedelta(minutes=min(SCHEDULE_SPREAD_MAX_MINUTES, max(hours * 60 - 1, 0)))
+
+
+def get_schedule_spread_offsets(count, spread_window):
+    """Evenly distribute count items from zero through spread_window."""
+    if count <= 1 or spread_window <= timedelta():
+        return [timedelta() for _ in range(max(count, 0))]
+
+    step = spread_window / (count - 1)
+    return [step * index for index in range(count)]

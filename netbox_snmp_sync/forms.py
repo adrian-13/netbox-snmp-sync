@@ -1,4 +1,6 @@
 from django import forms
+from django.core.exceptions import ValidationError
+from django.utils import timezone
 
 from dcim.models import Device
 from netbox.forms import NetBoxModelBulkEditForm, NetBoxModelForm, NetBoxModelImportForm
@@ -11,10 +13,19 @@ from utilities.forms.fields import (
 from utilities.forms.widgets import BulkEditNullBooleanSelect
 
 from .choices import SNMPVersionChoices
-from .models import DeviceSNMPConfig, SNMPSyncConfig
+from .models import DeviceSNMPConfig, SNMPSyncConfig, normalize_sync_hours
 
 
-class DeviceSNMPConfigForm(NetBoxModelForm):
+class SyncHoursFormMixin:
+    def clean_sync_at_hours(self):
+        raw = (self.cleaned_data.get("sync_at_hours") or "").strip()
+        try:
+            return normalize_sync_hours(raw)
+        except ValidationError as exc:
+            raise forms.ValidationError(exc.messages) from exc
+
+
+class DeviceSNMPConfigForm(SyncHoursFormMixin, NetBoxModelForm):
     device = DynamicModelChoiceField(queryset=Device.objects.all())
 
     class Meta:
@@ -35,11 +46,13 @@ class DeviceSNMPConfigForm(NetBoxModelForm):
             "target_override",
             "default_ethernet_type",
             "skip_loopback_ips",
+            "sync_interval_hours",
+            "sync_at_hours",
             "tags",
         )
 
 
-class DeviceSNMPConfigBulkEditForm(NetBoxModelBulkEditForm):
+class DeviceSNMPConfigBulkEditForm(SyncHoursFormMixin, NetBoxModelBulkEditForm):
     """Edit SNMP settings on many existing configs at once (Device SNMP Configs → Edit Selected)."""
 
     model = DeviceSNMPConfig
@@ -52,11 +65,13 @@ class DeviceSNMPConfigBulkEditForm(NetBoxModelBulkEditForm):
     retries = forms.IntegerField(required=False, min_value=0)
     target_override = forms.CharField(required=False)
     skip_loopback_ips = forms.NullBooleanField(required=False, widget=BulkEditNullBooleanSelect())
+    sync_interval_hours = forms.IntegerField(required=False, min_value=0)
+    sync_at_hours = forms.CharField(required=False)
 
-    nullable_fields = ("community", "target_override")
+    nullable_fields = ("community", "target_override", "sync_interval_hours")
 
 
-class DeviceSNMPConfigImportForm(NetBoxModelImportForm):
+class DeviceSNMPConfigImportForm(SyncHoursFormMixin, NetBoxModelImportForm):
     device = CSVModelChoiceField(
         queryset=Device.objects.all(),
         to_field_name="name",
@@ -69,6 +84,7 @@ class DeviceSNMPConfigImportForm(NetBoxModelImportForm):
             "device", "enabled", "snmp_version", "port", "community",
             "username", "auth_protocol", "auth_key", "priv_protocol", "priv_key",
             "timeout", "retries", "target_override", "default_ethernet_type", "skip_loopback_ips",
+            "sync_interval_hours", "sync_at_hours",
         )
 
 
@@ -78,7 +94,7 @@ class SNMPSyncConfigForm(NetBoxModelForm):
     class Meta:
         model = SNMPSyncConfig
         fields = (
-            "sync_interval_hours", "sync_at_hours",
+            "sync_interval_hours", "sync_at_hours", "sync_job_timeout_seconds",
             "update_existing", "set_mac_address", "write_vlans", "create_vlans",
             "history_keep_days", "history_keep_count",
         )
@@ -105,6 +121,13 @@ class SNMPSyncConfigForm(NetBoxModelForm):
             hours.append(int(part))
         # Canonical form: unique, sorted.
         return ",".join(str(h) for h in sorted(set(hours)))
+
+    def save(self, commit=True):
+        schedule_changed = bool({"sync_interval_hours", "sync_at_hours"} & set(self.changed_data))
+        obj = super().save(commit=commit)
+        if commit and schedule_changed:
+            DeviceSNMPConfig.reset_all_next_sync(timezone.now(), global_only=True)
+        return obj
 
 
 class BulkSNMPConfigForm(forms.Form):

@@ -1,10 +1,9 @@
 """Background jobs for SNMP collection + sync.
 
-``SNMPSyncJob`` runs on demand (the device Compare/Sync buttons). ``ScheduledSNMPSyncJob``
-is a system job that runs hourly and syncs every enabled device that is "due" according to
-the plugin's ``sync_interval_hours`` setting — this replaces the standalone tool's external
-cron / Windows Task Scheduler. Every run is recorded as a ``SyncRun`` (history + the source
-for the scheduler's per-device due check).
+``SNMPSyncJob`` runs on demand from the device actions. ``ScheduledSNMPSyncJob`` is a
+frequent scheduler check that queues one isolated sync job per due device, based on the
+device's effective schedule. Every run is recorded as a ``SyncRun`` and mirrored onto
+``DeviceSNMPConfig`` for visible scheduler state.
 """
 import asyncio
 import uuid
@@ -21,6 +20,8 @@ from utilities.request import NetBoxFakeRequest
 from . import engine
 from .choices import SyncModeChoices, SyncStatusChoices, SyncTriggerChoices
 from .snmp_collector import collect_with_ping
+
+SCHEDULE_CHECK_INTERVAL_MINUTES = 5
 
 
 def _fake_request(user):
@@ -40,7 +41,16 @@ def _fake_request(user):
     })
 
 
-def _sync_one(config, *, mode, trigger, logger=None, user=None):
+async def _collect_with_job_timeout(spec, timeout_seconds):
+    if timeout_seconds and timeout_seconds > 0:
+        try:
+            return await asyncio.wait_for(collect_with_ping(spec), timeout=timeout_seconds)
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(f"SNMP collection timed out after {timeout_seconds} seconds.") from exc
+    return await collect_with_ping(spec)
+
+
+def _sync_one(config, *, mode, trigger, logger=None, user=None, reset_schedule=False):
     """Poll one device over SNMP and compare or apply; record a SyncRun. Returns a summary.
 
     Writes are wrapped in ``event_tracking`` so they appear in NetBox's change log (audit).
@@ -57,20 +67,25 @@ def _sync_one(config, *, mode, trigger, logger=None, user=None):
             getattr(logger, level)(msg)
 
     if not spec.target:
-        SyncRun.objects.create(
+        run = SyncRun.objects.create(
             device=device, trigger=trigger, mode=mode, status=SyncStatusChoices.FAILED,
             message="No SNMP target (set a primary IP on the device or a target override).",
         )
+        config.record_sync_result(run, update_schedule=(trigger == SyncTriggerChoices.SCHEDULED))
         raise JobFailed(f"{device}: no SNMP target.")
 
     _log("info", f"Polling {spec.target} over SNMP (v{spec.snmp_version}) …")
     try:
-        data = asyncio.run(collect_with_ping(spec))
+        data = asyncio.run(_collect_with_job_timeout(
+            spec,
+            get_setting("sync_job_timeout_seconds") or 0,
+        ))
     except Exception as exc:  # noqa: BLE001
-        SyncRun.objects.create(
+        run = SyncRun.objects.create(
             device=device, trigger=trigger, mode=mode, status=SyncStatusChoices.FAILED,
             message=f"SNMP collection failed: {exc}",
         )
+        config.record_sync_result(run, update_schedule=(trigger == SyncTriggerChoices.SCHEDULED))
         raise JobFailed(f"{spec.target}: SNMP collection failed: {exc}") from exc
 
     _log("info", f"{spec.target}: sysName={data.sys_name}, "
@@ -99,6 +114,10 @@ def _sync_one(config, *, mode, trigger, logger=None, user=None):
             ips_created=result.ips_created, ips_existing=result.ips_existing, message=msg,
         )
         record_created_objects(run, result.created_objects)
+        config.record_sync_result(
+            run,
+            update_schedule=(trigger == SyncTriggerChoices.SCHEDULED or reset_schedule),
+        )
         _log("info", summary)
         for w in result.warnings:
             _log("warning", w)
@@ -108,8 +127,12 @@ def _sync_one(config, *, mode, trigger, logger=None, user=None):
     diff = engine.compare_device(device, data)
     summary = (f"{diff.new_interfaces} new / {diff.changed_interfaces} changed interfaces, "
                f"{diff.new_ips} new IPs, {len(diff.netbox_only_interfaces)} only in NetBox")
-    SyncRun.objects.create(
+    run = SyncRun.objects.create(
         device=device, trigger=trigger, mode=mode, status=SyncStatusChoices.OK, message=summary,
+    )
+    config.record_sync_result(
+        run,
+        update_schedule=(trigger == SyncTriggerChoices.SCHEDULED or reset_schedule),
     )
     _log("info", summary)
     return summary
@@ -124,85 +147,68 @@ class SNMPSyncJob(JobRunner):
 
         mode = kwargs.get("mode", SyncModeChoices.COMPARE)
         trigger = kwargs.get("trigger", SyncTriggerChoices.MANUAL)
+        reset_schedule = bool(kwargs.get("reset_schedule"))
         config = self.job.object
         if config is None:
             config = DeviceSNMPConfig.objects.get(pk=kwargs["config_pk"])
-        return _sync_one(config, mode=mode, trigger=trigger,
-                         logger=self.logger, user=self.job.user)
+        if not config.mark_sync_started(self.job.job_id):
+            raise JobFailed(f"{config.device}: another SNMP sync job is already active.")
+        try:
+            return _sync_one(config, mode=mode, trigger=trigger,
+                             logger=self.logger, user=self.job.user,
+                             reset_schedule=reset_schedule)
+        finally:
+            config.clear_sync_job(job_id=self.job.job_id)
 
 
-def _parse_hours(raw):
-    """Parse a comma-separated hour list ('3,15') into a set of valid ints in 0–23."""
-    out = set()
-    for part in str(raw or "").replace(" ", "").split(","):
-        if part.isdigit() and 0 <= int(part) <= 23:
-            out.add(int(part))
-    return out
-
-
-@system_job(interval=JobIntervalChoices.INTERVAL_HOURLY)
+@system_job(interval=SCHEDULE_CHECK_INTERVAL_MINUTES)
 class ScheduledSNMPSyncJob(JobRunner):
     class Meta:
         name = "Scheduled SNMP Sync"
 
     def run(self, *args, **kwargs):
-        from .models import DeviceSNMPConfig, SyncRun, get_setting
-
-        hours = get_setting("sync_interval_hours") or 0
-        allowed_hours = _parse_hours(get_setting("sync_at_hours"))
-
-        # The scheduler is on if either an interval or specific hours are configured.
-        if hours <= 0 and not allowed_hours:
-            self.logger.info("Scheduled SNMP sync is disabled (no interval and no hours set).")
-            return
+        from .models import DeviceSNMPConfig
 
         now = timezone.now()
 
-        if allowed_hours:
-            # Fixed-hour mode: only act during the configured hour(s). This system job wakes
-            # once per hour, so a short dedup window prevents a duplicate run in the same hour
-            # while tolerating timing jitter; the interval is ignored in this mode.
-            if now.hour not in allowed_hours:
-                self.logger.info(
-                    f"Hour {now.hour:02d}:xx is not a scheduled sync hour "
-                    f"({sorted(allowed_hours)}); nothing to do."
-                )
-                return
-            cutoff = now - timedelta(minutes=90)
-            mode_desc = f"at hour(s) {sorted(allowed_hours)}"
-        else:
-            # Interval mode: a device is due when its last successful scheduled sync is older
-            # than sync_interval_hours.
-            cutoff = now - timedelta(hours=hours)
-            mode_desc = f"interval {hours}h"
-
-        queued = 0
+        due = queued = skipped_active = 0
         for config in DeviceSNMPConfig.objects.filter(enabled=True).select_related("device"):
             if not config.target:
                 continue
-            last = (
-                SyncRun.objects.filter(
-                    device=config.device,
-                    trigger=SyncTriggerChoices.SCHEDULED,
-                    status=SyncStatusChoices.OK,
-                )
-                .order_by("-created")
-                .first()
-            )
-            if last and last.created > cutoff:
+            if not config.is_schedule_enabled():
+                if config.next_sync_at is not None:
+                    config.reset_next_sync(now)
+                continue
+            if config.next_sync_at is None:
+                config.reset_next_sync(now)
+                if config.next_sync_at is None:
+                    continue
+            if config.next_sync_at and config.next_sync_at > now:
+                continue
+            due += 1
+            if not config.claim_sync_slot(now):
+                skipped_active += 1
                 continue
             # Enqueue an isolated per-device job rather than syncing inline: one slow/hung
             # device no longer blocks the rest, failures are isolated, and the work spreads
             # across however many RQ workers are running.
-            SNMPSyncJob.enqueue(
-                config_pk=config.pk,
-                mode=SyncModeChoices.APPLY,
-                trigger=SyncTriggerChoices.SCHEDULED,
-                user=self.job.user,
-            )
+            try:
+                job = SNMPSyncJob.enqueue(
+                    config_pk=config.pk,
+                    mode=SyncModeChoices.APPLY,
+                    trigger=SyncTriggerChoices.SCHEDULED,
+                    user=self.job.user,
+                )
+                config.mark_sync_queued(job.job_id)
+            except Exception:
+                config.clear_sync_job()
+                raise
             queued += 1
 
-        self.logger.info(f"Scheduled SNMP sync ({mode_desc}): queued {queued} due device(s).")
+        self.logger.info(
+            f"Scheduled SNMP sync: queued {queued}, "
+            f"skipped {skipped_active} already active, {due} due device(s)."
+        )
 
 
 @system_job(interval=JobIntervalChoices.INTERVAL_DAILY)

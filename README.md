@@ -217,6 +217,9 @@ PLUGINS_CONFIG = {
                                     # day (interval is then ignored). Blank = use interval.
 
         # ── History retention (SyncRun pruning) ─────────────────────────────────────
+        "sync_job_timeout_seconds": 300,  # max SNMP collection runtime per background job;
+                                         # 0 disables this guard
+
         "history_keep_days":  90,
         "history_keep_count": 1000,
     },
@@ -259,6 +262,10 @@ bottom. Results are shown in a single table.
 
 All three dispatch a background job visible at **Jobs** in the NetBox admin area.
 
+Use **Sync & schedule** when you want a manual apply sync to also reset the device's
+automatic schedule from that successful run. Regular manual **Sync all** updates the
+device but leaves **Next sync** unchanged.
+
 ### 4 — Review history
 
 **SNMP Sync → Sync Runs** lists every run with its timestamp, trigger, mode, status, and
@@ -269,16 +276,45 @@ reverted, the **Revert run** button is available.
 
 There are two scheduling modes, both configured at **SNMP Sync → Settings**:
 
-- **Interval mode** — set `sync_interval_hours` to a positive integer. The hourly system job
-  queues a sync for every enabled device that has not had a successful scheduled sync within
-  the configured window (e.g. every 24 h).
+- **Interval mode** — set `sync_interval_hours` to a positive integer. The scheduler check
+  runs every few minutes and queues a sync for every enabled device whose **Next sync** time
+  is due. **Scheduled SNMP Sync** is only a scheduler check; actual per-device **SNMP Sync**
+  jobs are queued only when a device is due. Changing the interval recalculates each device's
+  **Next sync** from the time the setting is saved, and due devices are picked up on the next
+  scheduler check. When multiple devices are re-anchored at once, their next runs are spread
+  over a short window so they do not all start at the same second.
 - **Fixed-hour mode** — set **Sync at hours** to one or more hours of the day (0–23,
   comma-separated, e.g. `3` or `3,15`). Syncs then run only during those hours (e.g. daily at
   03:00). When set, the interval is ignored.
 
 Newly added device configurations are picked up automatically on the next scheduler run — no
 restart or manual step needed. Each device gets its own isolated RQ job, so a slow or
-unreachable device does not block the others.
+unreachable device does not block the others. If a device already has a pending or running
+SNMP sync job, the scheduler reuses it instead of queuing a duplicate. Failed scheduled syncs
+use a simple exponential retry delay (1 h, 2 h, 4 h, up to 24 h) before trying again. The
+device list and detail panel show **Retry** / **Retry due** with the failure count and last
+error message.
+
+Background sync jobs also have a configurable SNMP collection timeout. Set
+**Sync job timeout seconds** in Settings to cap the collection phase for one device; use `0`
+only if you explicitly want to disable this guard.
+
+Each **Device SNMP Configuration** can override the global scheduler:
+
+- Leave **Sync interval hours** and **Sync at hours** blank to inherit the global schedule.
+- Set **Sync interval hours** on one device to give it its own rolling interval.
+- Set **Sync at hours** on one device to run that device only at specific local hours.
+- Set **Sync interval hours** to `0` with no per-device hours to disable automatic sync for
+  that device while keeping manual sync available.
+
+Changing a per-device schedule immediately re-anchors that device's **Next sync**. Changing
+the global schedule re-anchors only devices that inherit the global scheduler; devices with
+explicit per-device schedules keep their own cadence.
+
+On a device SNMP configuration detail page, operators with change permission can also
+**Recalculate** the next sync from the current effective schedule. If a queued/running marker
+is visible, **Reconcile marker** safely clears it only when NetBox no longer has an active or
+recent matching job.
 
 ---
 
@@ -370,6 +406,22 @@ No internal NetBox code is imported directly.
 ---
 
 ## Changelog
+
+### Unreleased
+- **Visible schedule state** - device configs now track last sync, next sync, retry state,
+  queued/running job markers, and stale job cleanup.
+- **Deterministic scheduler** - due checks run every 5 minutes, queue isolated per-device
+  jobs, avoid duplicate queued/running jobs, retry failures with backoff, and spread bulk
+  schedule changes over a short window.
+- **Per-device schedule overrides** - each device can inherit the global schedule, use its
+  own interval, use its own fixed hours, or disable automatic sync while retaining manual
+  sync.
+- **Job runtime guard** - background sync jobs can cap the SNMP collection phase with
+  `sync_job_timeout_seconds`.
+- **Operator recovery actions** - device config detail pages include POST-only controls to
+  recalculate next sync and safely reconcile stale sync markers.
+- Migrations: 0008 (schedule state), 0009 (job state), 0010 (per-device schedule overrides),
+  0011 (sync job timeout)
 
 ### v0.3.0
 - **Fixed-hour scheduling** — new **Sync at hours** setting (0–23, comma-separated). Scheduled

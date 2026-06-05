@@ -6,7 +6,11 @@ from .models import DeviceSNMPConfig, SyncRun
 class DeviceSNMPConfigFilterSet(NetBoxModelFilterSet):
     class Meta:
         model = DeviceSNMPConfig
-        fields = ("id", "device", "enabled", "snmp_version", "port")
+        fields = (
+            "id", "device", "enabled", "snmp_version", "port",
+            "sync_interval_hours", "sync_at_hours",
+            "last_sync_status", "next_sync_at",
+        )
 
     def search(self, queryset, name, value):
         return queryset.filter(device__name__icontains=value)

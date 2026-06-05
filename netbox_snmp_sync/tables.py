@@ -6,21 +6,36 @@ from .models import DeviceSNMPConfig, SyncRun
 
 
 SNMP_TEST_BUTTON = """
-<a href="{% url 'plugins:netbox_snmp_sync:devicesnmpconfig_test' pk=record.pk %}"
-   class="btn btn-sm btn-cyan" title="Test SNMP (read-only)">
+<button type="submit"
+        class="btn btn-sm btn-cyan"
+        title="Test SNMP"
+        formaction="{% url 'plugins:netbox_snmp_sync:devicesnmpconfig_test' pk=record.pk %}"
+        formmethod="post"
+        formnovalidate>
   <i class="mdi mdi-access-point-check"></i>
-</a>
+</button>
 """
 
 
 LAST_TEST_COL = """{% if record.last_test_time %}<span class="badge text-bg-{{ record.last_test_color }}">{% if record.last_tested_ok %}OK{% else %}Failed{% endif %}</span> <span class="text-muted" title="{{ record.last_test_message }}">{{ record.last_test_time|date:'Y-m-d H:i' }}</span>{% else %}<span class="text-muted">never</span>{% endif %}"""
+
+LAST_SYNC_COL = """{% if record.last_sync_at %}<span class="badge text-bg-{{ record.last_sync_color }}">{{ record.get_last_sync_status_display }}</span> <span class="text-muted" title="{{ record.last_sync_message }}">{{ record.last_sync_at|date:'Y-m-d H:i' }}</span>{% else %}<span class="text-muted">never</span>{% endif %}"""
+
+SYNC_STATE_COL = """<span class="badge text-bg-{{ record.sync_state_color }}" title="{{ record.last_sync_message }}">{{ record.sync_state_label }}</span>{% if record.sync_queued_at %} <span class="text-muted">{{ record.sync_queued_at|date:'Y-m-d H:i' }}</span>{% endif %}{% if record.is_retrying %} <span class="text-muted">failures: {{ record.consecutive_sync_failures }}</span>{% endif %}"""
+
+NEXT_SYNC_COL = """{% if not record.enabled %}<span class="text-muted">disabled</span>{% elif record.sync_state == 'disabled' %}<span class="text-muted">not scheduled</span>{% elif record.sync_state == 'retry_due' %}<span class="badge text-bg-orange">Retry due</span> <span class="text-muted">{{ record.next_sync_at|date:'Y-m-d H:i' }}</span>{% elif record.sync_state == 'retry' %}<span class="badge text-bg-red">Retry</span> <span class="text-muted">{{ record.next_sync_at|date:'Y-m-d H:i' }}</span>{% elif record.sync_state == 'due' %}<span class="badge text-bg-orange">Due</span> <span class="text-muted">{{ record.next_sync_at|date:'Y-m-d H:i' }}</span>{% elif record.next_sync_at %}{{ record.next_sync_at|date:'Y-m-d H:i' }}{% else %}<span class="text-muted">pending</span>{% endif %}"""
+
+SCHEDULE_COL = """<span class="badge text-bg-{{ record.schedule_color }}">{{ record.schedule_label }}</span>"""
 
 
 class DeviceSNMPConfigTable(NetBoxTable):
     device = tables.Column(linkify=True)
     enabled = columns.BooleanColumn()
     snmp_version = columns.ChoiceFieldColumn()
-    last_test = tables.TemplateColumn(template_code=LAST_TEST_COL, verbose_name="Last test", orderable=False)
+    last_sync = tables.TemplateColumn(template_code=LAST_SYNC_COL, verbose_name="Last sync", orderable=False)
+    schedule = tables.TemplateColumn(template_code=SCHEDULE_COL, verbose_name="Schedule", orderable=False)
+    sync_state = tables.TemplateColumn(template_code=SYNC_STATE_COL, verbose_name="Sync state", orderable=False)
+    next_sync = tables.TemplateColumn(template_code=NEXT_SYNC_COL, verbose_name="Next sync", orderable=False)
     actions = columns.ActionsColumn(extra_buttons=SNMP_TEST_BUTTON)
 
     class Meta(NetBoxTable.Meta):
@@ -35,11 +50,17 @@ class DeviceSNMPConfigTable(NetBoxTable):
             "community",
             "timeout",
             "retries",
-            "last_test",
+            "schedule",
+            "last_sync",
+            "sync_state",
+            "next_sync",
             "created",
             "last_updated",
         )
-        default_columns = ("device", "enabled", "snmp_version", "port", "community", "last_test")
+        default_columns = (
+            "device", "enabled", "snmp_version", "port", "community",
+            "schedule", "last_sync", "sync_state", "next_sync",
+        )
 
 
 class SyncRunTable(NetBoxTable):

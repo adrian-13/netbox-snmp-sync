@@ -45,6 +45,8 @@ class NetBoxSNMPSyncConfig(PluginConfig):
         "sync_interval_hours": 0,
         # scheduler: restrict syncs to these hours of the day (e.g. "3" or "3,15"); blank = any
         "sync_at_hours": "",
+        # background job safety limit; 0 disables the wrapper timeout
+        "sync_job_timeout_seconds": 300,
         # history retention (daily prune job): keep at most N runs and/or runs newer than D days
         "history_keep_days": 90,
         "history_keep_count": 1000,

@@ -127,20 +127,35 @@ class DeviceSNMPConfigBulkDeleteView(generic.BulkDeleteView):
 class DeviceSNMPConfigSyncView(LoginRequiredMixin, View):
     """Enqueue an SNMP collect/compare/sync job for a device's SNMP config."""
 
-    def get(self, request, pk):
-        return self._enqueue(request, pk)
-
     def post(self, request, pk):
         return self._enqueue(request, pk)
 
     def _enqueue(self, request, pk):
         config = get_object_or_404(DeviceSNMPConfig, pk=pk)
-        mode = request.GET.get("mode", "compare")
-        if not request.user.has_perm("netbox_snmp_sync.view_devicesnmpconfig"):
+        mode = request.POST.get("mode", SyncModeChoices.COMPARE)
+        if mode not in {SyncModeChoices.COMPARE, SyncModeChoices.DRY_RUN, SyncModeChoices.APPLY}:
+            messages.error(request, "Invalid SNMP sync mode.")
+            return redirect(config.get_absolute_url())
+        reset_schedule = request.POST.get("reset_schedule") == "1" and mode == SyncModeChoices.APPLY
+        if not request.user.has_perm("netbox_snmp_sync.change_devicesnmpconfig"):
             messages.error(request, "You do not have permission to run SNMP sync.")
             return redirect(config.get_absolute_url())
-        job = SNMPSyncJob.enqueue(config_pk=config.pk, user=request.user, mode=mode)
-        messages.success(request, f"Queued SNMP '{mode}' for {config.device}.")
+        if not config.claim_sync_slot():
+            messages.warning(request, f"SNMP sync for {config.device} is already queued or running.")
+            return redirect(config.get_absolute_url())
+        try:
+            job = SNMPSyncJob.enqueue(
+                config_pk=config.pk,
+                user=request.user,
+                mode=mode,
+                reset_schedule=reset_schedule,
+            )
+            config.mark_sync_queued(job.job_id)
+        except Exception:
+            config.clear_sync_job()
+            raise
+        suffix = " and schedule reset" if reset_schedule else ""
+        messages.success(request, f"Queued SNMP '{mode}' for {config.device}{suffix}.")
         return redirect(job.get_absolute_url())
 
 
@@ -150,9 +165,9 @@ class DeviceSNMPConfigTestView(LoginRequiredMixin, View):
     (OK/Failed + sysName, vendor, counts). Also persists the outcome on the config so the list
     column / device panel show it. Writes nothing else to NetBox."""
 
-    def get(self, request, pk):
+    def post(self, request, pk):
         config = get_object_or_404(DeviceSNMPConfig, pk=pk)
-        if not request.user.has_perm("netbox_snmp_sync.view_devicesnmpconfig"):
+        if not request.user.has_perm("netbox_snmp_sync.change_devicesnmpconfig"):
             messages.error(request, "You do not have permission to run an SNMP test.")
             return redirect(config.get_absolute_url())
 
@@ -180,7 +195,7 @@ class DeviceSNMPConfigBulkTestView(LoginRequiredMixin, View):
         return redirect(self.list_url)
 
     def post(self, request):
-        if not request.user.has_perm("netbox_snmp_sync.view_devicesnmpconfig"):
+        if not request.user.has_perm("netbox_snmp_sync.change_devicesnmpconfig"):
             messages.error(request, "You do not have permission to run an SNMP test.")
             return redirect(self.list_url)
 
@@ -207,6 +222,49 @@ class DeviceSNMPConfigBulkTestView(LoginRequiredMixin, View):
             "fail_count": len(results) - ok_count,
             "return_url": reverse(self.list_url),
         })
+
+
+@register_model_view(DeviceSNMPConfig, name="reset_schedule", path="reset-schedule")
+class DeviceSNMPConfigResetScheduleView(LoginRequiredMixin, View):
+    """Recalculate one config's next scheduled sync from its current effective schedule."""
+
+    def post(self, request, pk):
+        config = get_object_or_404(DeviceSNMPConfig, pk=pk)
+        if not request.user.has_perm("netbox_snmp_sync.change_devicesnmpconfig"):
+            messages.error(request, "You do not have permission to change SNMP scheduling.")
+            return redirect(config.get_absolute_url())
+
+        next_sync = config.reset_next_sync(timezone.now())
+        if next_sync:
+            messages.success(request, f"Recalculated next SNMP sync for {config.device}: {next_sync}.")
+        else:
+            messages.success(request, f"SNMP automatic sync is not scheduled for {config.device}.")
+        return redirect(config.get_absolute_url())
+
+
+@register_model_view(DeviceSNMPConfig, name="reconcile_marker", path="reconcile-marker")
+class DeviceSNMPConfigReconcileMarkerView(LoginRequiredMixin, View):
+    """Safely clear a stale sync marker when NetBox no longer has an active job for it."""
+
+    def post(self, request, pk):
+        config = get_object_or_404(DeviceSNMPConfig, pk=pk)
+        if not request.user.has_perm("netbox_snmp_sync.change_devicesnmpconfig"):
+            messages.error(request, "You do not have permission to change SNMP scheduling.")
+            return redirect(config.get_absolute_url())
+
+        if not config.sync_job_id:
+            messages.info(request, f"{config.device} has no queued/running SNMP sync marker.")
+            return redirect(config.get_absolute_url())
+
+        marker = config.sync_job_id
+        if config.clear_stale_sync_job(timezone.now()):
+            messages.success(request, f"Cleared stale SNMP sync marker {marker} for {config.device}.")
+        else:
+            messages.warning(
+                request,
+                f"SNMP sync marker {marker} for {config.device} still matches an active or recent job.",
+            )
+        return redirect(config.get_absolute_url())
 
 
 @register_model_view(DeviceSNMPConfig, name="preview", path="preview")
@@ -273,6 +331,7 @@ class DeviceSNMPConfigPreviewView(LoginRequiredMixin, View):
             message=f"Interactive write: {result.interfaces_created} interfaces, {result.ips_created} IPs selected.",
         )
         record_created_objects(run, result.created_objects)
+        config.record_sync_result(run, update_schedule=False)
         messages.success(
             request,
             f"Wrote {result.interfaces_created} interface(s) and {result.ips_created} IP(s).",

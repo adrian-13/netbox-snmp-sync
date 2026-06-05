@@ -4,18 +4,37 @@
     SNMP Sync
     {% if snmp_config %}
     <div class="card-actions">
-      <a href="{% url 'plugins:netbox_snmp_sync:devicesnmpconfig_test' pk=snmp_config.pk %}" class="btn btn-sm btn-cyan">
-        <i class="mdi mdi-access-point-check"></i> Test SNMP
-      </a>
+      <form method="post" action="{% url 'plugins:netbox_snmp_sync:devicesnmpconfig_test' pk=snmp_config.pk %}" class="d-inline">
+        {% csrf_token %}
+        <button type="submit" class="btn btn-sm btn-cyan">
+          <i class="mdi mdi-access-point-check"></i> Test SNMP
+        </button>
+      </form>
       <a href="{% url 'plugins:netbox_snmp_sync:devicesnmpconfig_preview' pk=snmp_config.pk %}" class="btn btn-sm btn-success">
         <i class="mdi mdi-magnify-scan"></i> Preview &amp; write
       </a>
-      <a href="{% url 'plugins:netbox_snmp_sync:devicesnmpconfig_sync' pk=snmp_config.pk %}?mode=compare" class="btn btn-sm btn-info">
-        <i class="mdi mdi-compare-horizontal"></i> Compare
-      </a>
-      <a href="{% url 'plugins:netbox_snmp_sync:devicesnmpconfig_sync' pk=snmp_config.pk %}?mode=apply" class="btn btn-sm btn-secondary">
-        <i class="mdi mdi-sync"></i> Sync all
-      </a>
+      <form method="post" action="{% url 'plugins:netbox_snmp_sync:devicesnmpconfig_sync' pk=snmp_config.pk %}" class="d-inline">
+        {% csrf_token %}
+        <input type="hidden" name="mode" value="compare">
+        <button type="submit" class="btn btn-sm btn-info">
+          <i class="mdi mdi-compare-horizontal"></i> Compare
+        </button>
+      </form>
+      <form method="post" action="{% url 'plugins:netbox_snmp_sync:devicesnmpconfig_sync' pk=snmp_config.pk %}" class="d-inline">
+        {% csrf_token %}
+        <input type="hidden" name="mode" value="apply">
+        <button type="submit" class="btn btn-sm btn-secondary">
+          <i class="mdi mdi-sync"></i> Sync all
+        </button>
+      </form>
+      <form method="post" action="{% url 'plugins:netbox_snmp_sync:devicesnmpconfig_sync' pk=snmp_config.pk %}" class="d-inline">
+        {% csrf_token %}
+        <input type="hidden" name="mode" value="apply">
+        <input type="hidden" name="reset_schedule" value="1">
+        <button type="submit" class="btn btn-sm btn-secondary">
+          <i class="mdi mdi-calendar-sync"></i> Sync &amp; schedule
+        </button>
+      </form>
       <a href="{% url 'plugins:netbox_snmp_sync:devicesnmpconfig' pk=snmp_config.pk %}" class="btn btn-sm btn-primary">
         <i class="mdi mdi-eye"></i> View
       </a>
@@ -32,12 +51,52 @@
     <tr><th scope="row">Port</th><td>{{ snmp_config.port }}</td></tr>
     <tr><th scope="row">Community</th><td>{{ snmp_config.community|placeholder }}</td></tr>
     <tr><th scope="row">Target</th><td>{{ snmp_config.target|placeholder }}</td></tr>
-    <tr><th scope="row">Last test</th><td>
-      {% if snmp_config.last_test_time %}
-        <span class="badge text-bg-{{ snmp_config.last_test_color }}">{% if snmp_config.last_tested_ok %}OK{% else %}Failed{% endif %}</span>
-        {{ snmp_config.last_test_time }}
-        <div><small class="text-muted">{{ snmp_config.last_test_message }}</small></div>
-      {% else %}<span class="text-muted">never tested</span>{% endif %}
+    <tr><th scope="row">Schedule</th><td>
+      <span class="badge text-bg-{{ snmp_config.schedule_color }}">{{ snmp_config.schedule_label }}</span>
+    </td></tr>
+    <tr><th scope="row">Last sync</th><td>
+      {% if last_sync %}
+        <a href="{{ last_sync.get_absolute_url }}">
+          <span class="badge text-bg-{{ last_sync.get_status_color }}">{{ last_sync.get_status_display }}</span>
+          {{ last_sync.created }}
+        </a>
+        <div>
+          <small class="text-muted">
+            {{ last_sync.get_trigger_display }} / {{ last_sync.get_mode_display }}{% if last_sync.message %}: {{ last_sync.message|truncatechars:160 }}{% endif %}
+          </small>
+        </div>
+      {% else %}<span class="text-muted">never synced</span>{% endif %}
+    </td></tr>
+    <tr><th scope="row">Sync state</th><td>
+      <span class="badge text-bg-{{ snmp_config.sync_state_color }}">{{ snmp_config.sync_state_label }}</span>
+      {% if snmp_config.sync_started_at %}
+        <span class="text-muted">{{ snmp_config.sync_started_at }}</span>
+      {% elif snmp_config.sync_queued_at %}
+        <span class="text-muted">{{ snmp_config.sync_queued_at }}</span>
+      {% endif %}
+      {% if snmp_config.is_retrying %}
+        <div><small class="text-muted">failures: {{ snmp_config.consecutive_sync_failures }}{% if snmp_config.last_sync_message %}; {{ snmp_config.last_sync_message|truncatechars:160 }}{% endif %}</small></div>
+      {% endif %}
+    </td></tr>
+    <tr><th scope="row">Next sync</th><td>
+      {% if not snmp_config.enabled %}
+        <span class="text-muted">disabled</span>
+      {% elif snmp_config.sync_state == 'disabled' %}
+        <span class="text-muted">not scheduled</span>
+      {% elif snmp_config.sync_state == 'retry_due' %}
+        <span class="badge text-bg-orange">Retry due</span>
+        <span class="text-muted">{{ snmp_config.next_sync_at }}</span>
+      {% elif snmp_config.sync_state == 'retry' %}
+        <span class="badge text-bg-red">Retry</span>
+        <span class="text-muted">{{ snmp_config.next_sync_at }}</span>
+      {% elif snmp_config.sync_state == 'due' %}
+        <span class="badge text-bg-orange">Due</span>
+        <span class="text-muted">{{ snmp_config.next_sync_at }}</span>
+      {% elif snmp_config.next_sync_at %}
+        {{ snmp_config.next_sync_at }}
+      {% else %}
+        <span class="text-muted">pending</span>
+      {% endif %}
     </td></tr>
   </table>
   {% else %}

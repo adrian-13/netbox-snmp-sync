@@ -34,6 +34,79 @@
         <tr><th scope="row">Skip loopback IPs</th><td>{{ object.skip_loopback_ips|yesno:"Yes,No" }}</td></tr>
       </table>
     </div>
+    <div class="card">
+      <h2 class="card-header">
+        Schedule
+        <div class="card-actions">
+          <form method="post" action="{% url 'plugins:netbox_snmp_sync:devicesnmpconfig_sync' pk=object.pk %}" class="d-inline">
+            {% csrf_token %}
+            <input type="hidden" name="mode" value="apply">
+            <input type="hidden" name="reset_schedule" value="1">
+            <button type="submit" class="btn btn-sm btn-secondary">
+              <i class="mdi mdi-calendar-sync"></i> Sync &amp; schedule
+            </button>
+          </form>
+          <form method="post" action="{% url 'plugins:netbox_snmp_sync:devicesnmpconfig_reset_schedule' pk=object.pk %}" class="d-inline">
+            {% csrf_token %}
+            <button type="submit" class="btn btn-sm btn-info">
+              <i class="mdi mdi-calendar-clock"></i> Recalculate
+            </button>
+          </form>
+          {% if object.sync_job_id %}
+          <form method="post" action="{% url 'plugins:netbox_snmp_sync:devicesnmpconfig_reconcile_marker' pk=object.pk %}" class="d-inline">
+            {% csrf_token %}
+            <button type="submit" class="btn btn-sm btn-warning">
+              <i class="mdi mdi-broom"></i> Reconcile marker
+            </button>
+          </form>
+          {% endif %}
+        </div>
+      </h2>
+      <table class="table table-hover attr-table">
+        <tr><th scope="row">Schedule</th><td>
+          <span class="badge text-bg-{{ object.schedule_color }}">{{ object.schedule_label }}</span>
+        </td></tr>
+        <tr><th scope="row">Last sync</th><td>
+          {% if object.last_sync_at %}
+            <span class="badge text-bg-{{ object.last_sync_color }}">{{ object.get_last_sync_status_display }}</span>
+            {{ object.last_sync_at }}
+            {% if object.last_sync_message %}<div><small class="text-muted">{{ object.last_sync_message }}</small></div>{% endif %}
+          {% else %}<span class="text-muted">never synced</span>{% endif %}
+        </td></tr>
+        <tr><th scope="row">Sync state</th><td>
+          <span class="badge text-bg-{{ object.sync_state_color }}">{{ object.sync_state_label }}</span>
+          {% if object.sync_started_at %}
+            <span class="text-muted">{{ object.sync_started_at }}</span>
+          {% elif object.sync_queued_at %}
+            <span class="text-muted">{{ object.sync_queued_at }}</span>
+          {% endif %}
+          {% if object.is_retrying %}
+            <div><small class="text-muted">failures: {{ object.consecutive_sync_failures }}{% if object.last_sync_message %}; {{ object.last_sync_message|truncatechars:160 }}{% endif %}</small></div>
+          {% endif %}
+        </td></tr>
+        <tr><th scope="row">Next sync</th><td>
+          {% if not object.enabled %}
+            <span class="text-muted">disabled</span>
+          {% elif object.sync_state == 'disabled' %}
+            <span class="text-muted">not scheduled</span>
+          {% elif object.sync_state == 'retry_due' %}
+            <span class="badge text-bg-orange">Retry due</span>
+            <span class="text-muted">{{ object.next_sync_at }}</span>
+          {% elif object.sync_state == 'retry' %}
+            <span class="badge text-bg-red">Retry</span>
+            <span class="text-muted">{{ object.next_sync_at }}</span>
+          {% elif object.sync_state == 'due' %}
+            <span class="badge text-bg-orange">Due</span>
+            <span class="text-muted">{{ object.next_sync_at }}</span>
+          {% elif object.next_sync_at %}
+            {{ object.next_sync_at }}
+          {% else %}
+            <span class="text-muted">pending</span>
+          {% endif %}
+        </td></tr>
+        <tr><th scope="row">Consecutive failures</th><td>{{ object.consecutive_sync_failures }}</td></tr>
+      </table>
+    </div>
   </div>
 </div>
 {% endblock %}
