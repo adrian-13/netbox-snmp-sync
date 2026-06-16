@@ -407,7 +407,9 @@ No internal NetBox code is imported directly.
 
 ## Changelog
 
-### Unreleased
+### v0.3.1
+- **Packaged plugin templates** - include NetBox HTML templates in the wheel so the
+  Device SNMP Configurations list renders after installing the published package.
 - **Visible schedule state** - device configs now track last sync, next sync, retry state,
   queued/running job markers, and stale job cleanup.
 - **Deterministic scheduler** - due checks run every 5 minutes, queue isolated per-device

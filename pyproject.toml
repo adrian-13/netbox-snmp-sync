@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "netbox-snmp-sync"
-version = "0.3.0"
+version = "0.3.1"
 authors = [
     { name = "Adrián Javorček", email = "adrian.javorcek@gmail.com" },
 ]
@@ -36,3 +36,6 @@ Issues = "https://github.com/adrian-13/netbox-snmp-sync/issues"
 
 [tool.setuptools.packages.find]
 include = ["netbox_snmp_sync*"]
+
+[tool.setuptools.package-data]
+netbox_snmp_sync = ["templates/netbox_snmp_sync/*.html"]

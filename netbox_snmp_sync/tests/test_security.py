@@ -24,6 +24,17 @@ SECRET_AUTH = "S3CRET_AUTHKEY"
 SECRET_PRIV = "S3CRET_PRIVKEY"
 
 
+class DeviceSNMPConfigListViewTestCase(TestCase):
+    def test_empty_list_view_renders(self):
+        admin = User.objects.create_superuser(username="empty_admin", email="empty@example.com", password="x")
+        client = Client()
+        client.force_login(admin)
+
+        response = client.get(reverse("plugins:netbox_snmp_sync:devicesnmpconfig_list"))
+
+        self.assertEqual(response.status_code, 200)
+
+
 class SecurityTestCase(TestCase):
     @classmethod
     def setUpTestData(cls):
