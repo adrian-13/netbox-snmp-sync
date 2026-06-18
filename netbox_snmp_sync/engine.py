@@ -8,8 +8,8 @@ The plugin always knows which ``dcim.Device`` it is syncing (the job runs per
 DeviceSNMPConfig), so there's no device-resolution-by-IP step here — the caller passes the
 Device object in.
 
-v1 scope: interfaces (create + optional update, MAC, parent) and IPv4 addresses. VLAN
-membership and LLDP cabling from the standalone tool are intentionally deferred.
+Current scope: interfaces, IPv4 addresses, optional VLAN membership, and reversible
+history for objects created by sync runs. LLDP collection is read-only metadata for now.
 """
 from __future__ import annotations
 

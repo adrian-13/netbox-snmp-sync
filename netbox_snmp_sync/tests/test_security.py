@@ -1,5 +1,6 @@
 """Security-focused tests: SNMP secrets must not leak via API/UI, and the custom
 action views (which trigger SNMP polls / writes) must require authentication + permission."""
+import json
 from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -15,6 +16,7 @@ from rest_framework.test import APIClient
 from users.models import ObjectPermission
 
 from netbox_snmp_sync.tables import SNMP_TEST_BUTTON
+from netbox_snmp_sync.dto import DeviceData, InterfaceData, serialize_device_data
 from netbox_snmp_sync.models import DeviceSNMPConfig, SNMPSyncConfig
 
 User = get_user_model()
@@ -130,6 +132,68 @@ class SecurityTestCase(TestCase):
         c.force_login(self.bob)
         r = c.get(reverse("plugins:netbox_snmp_sync:devicesnmpconfig_preview", args=[self.cfg.pk]))
         self.assertEqual(r.status_code, 302)  # redirected away, not rendered
+
+    def test_preview_renders_discovered_vlan_memberships(self):
+        settings = SNMPSyncConfig.get()
+        settings.write_vlans = True
+        settings.save()
+        data = DeviceData(target="10.0.0.1", sys_name="sw1")
+        data.interfaces[1] = InterfaceData(
+            if_index=1, name="ether1", if_type=6, nb_type="1000base-t", access_vlan=30,
+        )
+        self.cfg.target_override = "10.0.0.1"
+        self.cfg.save()
+        c = Client()
+        c.force_login(self.admin)
+        url = reverse("plugins:netbox_snmp_sync:devicesnmpconfig_preview", args=[self.cfg.pk])
+
+        with patch("netbox_snmp_sync.views._collect_blocking", return_value=data):
+            r = c.get(url)
+
+        self.assertEqual(r.status_code, 200)
+        self.assertContains(r, "VLAN memberships")
+        self.assertContains(r, "ether1")
+        self.assertContains(r, "30")
+
+    def test_preview_write_uses_runtime_vlan_settings(self):
+        settings = SNMPSyncConfig.get()
+        settings.write_vlans = True
+        settings.create_vlans = True
+        settings.save()
+        data = DeviceData(target="10.0.0.1", sys_name="sw1")
+        data.interfaces[1] = InterfaceData(
+            if_index=1, name="ether1", if_type=6, nb_type="1000base-t", access_vlan=30,
+        )
+        result = SimpleNamespace(
+            interfaces_created=0,
+            interfaces_updated=0,
+            interfaces_existing=1,
+            interfaces_ignored=0,
+            ips_created=0,
+            ips_existing=0,
+            iface_vlans_set=1,
+            vlans_created=1,
+            warnings=[],
+            created_objects=[],
+        )
+        c = Client()
+        c.force_login(self.admin)
+        url = reverse("plugins:netbox_snmp_sync:devicesnmpconfig_preview", args=[self.cfg.pk])
+
+        with patch("netbox_snmp_sync.views.engine.apply_sync", return_value=result) as apply_sync:
+            r = c.post(url, {
+                "snapshot": json.dumps(serialize_device_data(data)),
+                "vlan_iface": ["ether1"],
+            })
+
+        self.assertEqual(r.status_code, 302)
+        apply_sync.assert_called_once()
+        synced_data = apply_sync.call_args.args[1]
+        self.assertEqual([iface.name for iface in synced_data.interfaces.values()], ["ether1"])
+        self.assertTrue(apply_sync.call_args.kwargs["write_vlans"])
+        self.assertTrue(apply_sync.call_args.kwargs["create_vlans"])
+        run = self.cfg.device.snmp_sync_runs.latest("created")
+        self.assertIn("VLANs set 1, created 1", run.message)
 
     def test_sync_action_does_not_accept_get(self):
         c = Client()

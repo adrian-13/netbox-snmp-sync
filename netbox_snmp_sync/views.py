@@ -11,7 +11,6 @@ from django.utils import timezone
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.generic import View
 
-from netbox.plugins import get_plugin_config
 from netbox.views import generic
 from utilities.views import register_model_view
 
@@ -19,7 +18,7 @@ from . import engine, filtersets, forms, tables
 from .choices import SyncModeChoices, SyncStatusChoices, SyncTriggerChoices
 from .dto import deserialize_device_data, serialize_device_data
 from .jobs import SNMPSyncJob
-from .models import DeviceSNMPConfig, SNMPSyncConfig, SyncRun, record_created_objects
+from .models import DeviceSNMPConfig, SNMPSyncConfig, SyncRun, get_setting, record_created_objects
 from .snmp_collector import collect_with_ping
 
 
@@ -31,6 +30,19 @@ def _collect_blocking(spec):
     """
     with ThreadPoolExecutor(max_workers=1) as ex:
         return ex.submit(lambda: asyncio.run(collect_with_ping(spec))).result()
+
+
+def _vlan_preview_rows(data):
+    rows = []
+    for iface in data.interfaces.values():
+        if not iface.access_vlan and not iface.tagged_vlans:
+            continue
+        rows.append({
+            "name": iface.name,
+            "access_vlan": iface.access_vlan,
+            "tagged_vlans": ", ".join(str(v) for v in iface.tagged_vlans),
+        })
+    return rows
 
 
 def _evaluate(spec):
@@ -293,6 +305,9 @@ class DeviceSNMPConfigPreviewView(LoginRequiredMixin, View):
             "object": config,
             "device": config.device,
             "diff": diff,
+            "vlan_rows": _vlan_preview_rows(data),
+            "write_vlans_enabled": bool(get_setting("write_vlans")),
+            "create_vlans_enabled": bool(get_setting("create_vlans")),
             "snapshot": json.dumps(serialize_device_data(data)),
         })
 
@@ -309,7 +324,11 @@ class DeviceSNMPConfigPreviewView(LoginRequiredMixin, View):
 
         selected_ifaces = set(request.POST.getlist("iface"))
         selected_ips = set(request.POST.getlist("ip"))
-        data.interfaces = {i: f for i, f in data.interfaces.items() if f.name in selected_ifaces}
+        write_vlans = bool(get_setting("write_vlans"))
+        create_vlans = bool(get_setting("create_vlans"))
+        selected_vlan_ifaces = set(request.POST.getlist("vlan_iface")) if write_vlans else set()
+        selected_interface_names = selected_ifaces | selected_vlan_ifaces
+        data.interfaces = {i: f for i, f in data.interfaces.items() if f.name in selected_interface_names}
         data.ip_addresses = [ip for ip in data.ip_addresses if ip.address in selected_ips]
         if not data.interfaces and not data.ip_addresses:
             messages.warning(request, "Nothing selected to write.")
@@ -317,24 +336,31 @@ class DeviceSNMPConfigPreviewView(LoginRequiredMixin, View):
 
         result = engine.apply_sync(
             config.device, data, dry_run=False,
-            update_existing=bool(get_plugin_config("netbox_snmp_sync", "update_existing")),
-            set_mac_address=bool(get_plugin_config("netbox_snmp_sync", "set_mac_address")),
-            write_vlans=bool(get_plugin_config("netbox_snmp_sync", "write_vlans")),
-            create_vlans=bool(get_plugin_config("netbox_snmp_sync", "create_vlans")),
+            update_existing=bool(get_setting("update_existing")),
+            set_mac_address=bool(get_setting("set_mac_address")),
+            write_vlans=write_vlans,
+            create_vlans=create_vlans,
         )
+        message = (
+            f"Interactive write: {result.interfaces_created} interfaces, {result.ips_created} IPs selected; "
+            f"VLANs set {result.iface_vlans_set}, created {result.vlans_created}"
+        )
+        if result.warnings:
+            message += "; " + "; ".join(result.warnings)
         run = SyncRun.objects.create(
             device=config.device, trigger=SyncTriggerChoices.MANUAL, mode=SyncModeChoices.APPLY,
             status=SyncStatusChoices.OK,
             interfaces_created=result.interfaces_created, interfaces_updated=result.interfaces_updated,
             interfaces_existing=result.interfaces_existing, interfaces_ignored=result.interfaces_ignored,
             ips_created=result.ips_created, ips_existing=result.ips_existing,
-            message=f"Interactive write: {result.interfaces_created} interfaces, {result.ips_created} IPs selected.",
+            message=message,
         )
         record_created_objects(run, result.created_objects)
         config.record_sync_result(run, update_schedule=False)
         messages.success(
             request,
-            f"Wrote {result.interfaces_created} interface(s) and {result.ips_created} IP(s).",
+            f"Wrote {result.interfaces_created} interface(s), {result.ips_created} IP(s), "
+            f"set VLANs on {result.iface_vlans_set} interface(s), created {result.vlans_created} VLAN(s).",
         )
         return redirect(config.device.get_absolute_url())
 

@@ -73,6 +73,34 @@
     </table>
   </div>
 
+  <div class="card mb-3">
+    <h2 class="card-header">VLAN memberships</h2>
+    {% if write_vlans_enabled %}
+      <table class="table table-hover">
+        <thead>
+          <tr><th style="width:2rem"></th><th>Interface</th><th>Untagged VLAN</th><th>Tagged VLANs</th></tr>
+        </thead>
+        <tbody>
+          {% for row in vlan_rows %}
+          <tr>
+            <td><input class="form-check-input" type="checkbox" name="vlan_iface" value="{{ row.name }}" checked></td>
+            <td>{{ row.name }}</td>
+            <td>{{ row.access_vlan|placeholder }}</td>
+            <td>{{ row.tagged_vlans|placeholder }}</td>
+          </tr>
+          {% empty %}
+          <tr><td colspan="4" class="text-muted">No VLAN memberships reported.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% if create_vlans_enabled %}
+        <div class="card-footer text-muted">Missing VLANs will be created in the device site.</div>
+      {% endif %}
+    {% else %}
+      <div class="card-body text-muted">VLAN membership writes are disabled in SNMP Sync settings.</div>
+    {% endif %}
+  </div>
+
   <div class="text-end mb-4">
     <a href="{{ object.get_absolute_url }}" class="btn btn-outline-secondary">Cancel</a>
     <button type="submit" class="btn btn-primary"><i class="mdi mdi-content-save"></i> Write selected</button>
