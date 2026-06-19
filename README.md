@@ -407,6 +407,11 @@ No internal NetBox code is imported directly.
 
 ## Changelog
 
+### v0.3.3
+- **VLAN creation by device site** - when a discovered VID exists only in another site,
+  sync now creates the VLAN in the current device's site instead of reusing the unrelated
+  VLAN object.
+
 ### v0.3.2
 - **Sync run VLAN counters** - sync run detail pages now show how many VLANs were
   created and how many interfaces had VLAN membership written.

@@ -265,7 +265,7 @@ def _sync_iface_vlans(device, data: DeviceData, name_to_iface: dict, result: Syn
     VLANs are created in the device's site first. VID is not globally unique, so we prefer the
     device's site and refuse to guess when a VID exists in several scopes.
     """
-    needed: set[int] = set()
+    needed: set[int] = {v.vid for v in data.vlans} if create_vlans else set()
     for iface in data.interfaces.values():
         if iface.access_vlan:
             needed.add(iface.access_vlan)
@@ -277,7 +277,8 @@ def _sync_iface_vlans(device, data: DeviceData, name_to_iface: dict, result: Syn
     site_map: dict[int, VLAN] = {}
     all_map: dict[int, list] = {}
     for v in VLAN.objects.filter(vid__in=needed):
-        all_map.setdefault(v.vid, []).append(v)
+        if not site or v.site_id == site.id or (v.site_id is None and not create_vlans):
+            all_map.setdefault(v.vid, []).append(v)
         if site and v.site_id == site.id:
             site_map[v.vid] = v
 

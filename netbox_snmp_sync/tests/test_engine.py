@@ -126,6 +126,22 @@ class EngineTestCase(TestCase):
         eth1 = Interface.objects.get(device=self.device, name="ether1")
         self.assertEqual(eth1.untagged_vlan.vid, 30)
 
+    def test_create_vlan_in_device_site_when_vid_exists_elsewhere(self):
+        other_site = Site.objects.create(name="Other", slug="other")
+        VLAN.objects.create(vid=30, name="other-site-vlan", site=other_site)
+        data = DeviceData(target="x", sys_name="sw1")
+        data.vlans.append(VlanData(vid=30, name="mgmt"))
+        data.interfaces[1] = InterfaceData(
+            if_index=1, name="ether1", if_type=6, enabled=True, nb_type="1000base-t", access_vlan=30,
+        )
+
+        result = engine.apply_sync(self.device, data, dry_run=False, write_vlans=True, create_vlans=True)
+
+        self.assertEqual(result.vlans_created, 1)
+        self.assertTrue(VLAN.objects.filter(vid=30, name="mgmt", site=self.device.site).exists())
+        eth1 = Interface.objects.get(device=self.device, name="ether1")
+        self.assertEqual(eth1.untagged_vlan.site, self.device.site)
+
 
 class DeviceSNMPConfigTestCase(TestCase):
     @classmethod
