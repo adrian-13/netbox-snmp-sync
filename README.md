@@ -407,6 +407,12 @@ No internal NetBox code is imported directly.
 
 ## Changelog
 
+### v0.3.2
+- **Sync run VLAN counters** - sync run detail pages now show how many VLANs were
+  created and how many interfaces had VLAN membership written.
+- **Preview VLAN writes** - interactive preview/write now includes VLAN membership rows
+  and uses the runtime SNMP Sync settings for VLAN writes.
+
 ### v0.3.1
 - **Packaged plugin templates** - include NetBox HTML templates in the wheel so the
   Device SNMP Configurations list renders after installing the published package.

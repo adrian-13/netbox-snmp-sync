@@ -481,6 +481,8 @@ class SyncRun(NetBoxModel):
     interfaces_ignored = models.PositiveIntegerField(default=0)
     ips_created = models.PositiveIntegerField(default=0)
     ips_existing = models.PositiveIntegerField(default=0)
+    vlans_created = models.PositiveIntegerField(default=0)
+    iface_vlans_set = models.PositiveIntegerField(default=0)
     message = models.TextField(blank=True)
     reverted = models.BooleanField(default=False)
 

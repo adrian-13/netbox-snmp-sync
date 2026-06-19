@@ -17,7 +17,7 @@ from users.models import ObjectPermission
 
 from netbox_snmp_sync.tables import SNMP_TEST_BUTTON
 from netbox_snmp_sync.dto import DeviceData, InterfaceData, serialize_device_data
-from netbox_snmp_sync.models import DeviceSNMPConfig, SNMPSyncConfig
+from netbox_snmp_sync.models import DeviceSNMPConfig, SNMPSyncConfig, SyncRun
 
 User = get_user_model()
 
@@ -194,6 +194,28 @@ class SecurityTestCase(TestCase):
         self.assertTrue(apply_sync.call_args.kwargs["create_vlans"])
         run = self.cfg.device.snmp_sync_runs.latest("created")
         self.assertIn("VLANs set 1, created 1", run.message)
+
+    def test_syncrun_detail_shows_vlan_counters(self):
+        run = SyncRun.objects.create(
+            device=self.device,
+            trigger="manual",
+            mode="apply",
+            status="ok",
+            interfaces_created=1,
+            ips_created=2,
+            vlans_created=3,
+            iface_vlans_set=4,
+        )
+        c = Client()
+        c.force_login(self.admin)
+
+        r = c.get(run.get_absolute_url())
+
+        self.assertEqual(r.status_code, 200)
+        self.assertContains(r, "VLANs created")
+        self.assertContains(r, "VLANs set")
+        self.assertContains(r, ">3<")
+        self.assertContains(r, ">4<")
 
     def test_sync_action_does_not_accept_get(self):
         c = Client()

@@ -42,7 +42,7 @@ class SyncRunSerializer(NetBoxModelSerializer):
         fields = (
             "id", "url", "display", "device", "trigger", "mode", "status",
             "interfaces_created", "interfaces_updated", "interfaces_existing", "interfaces_ignored",
-            "ips_created", "ips_existing", "reverted", "message",
+            "ips_created", "ips_existing", "vlans_created", "iface_vlans_set", "reverted", "message",
             "tags", "custom_fields", "created", "last_updated",
         )
         brief_fields = ("id", "url", "display", "device", "mode", "status")

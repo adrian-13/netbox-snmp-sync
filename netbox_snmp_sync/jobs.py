@@ -130,7 +130,9 @@ def _sync_one(config, *, mode, trigger, logger=None, user=None, reset_schedule=F
             device=device, trigger=trigger, mode=mode, status=SyncStatusChoices.OK,
             interfaces_created=result.interfaces_created, interfaces_updated=result.interfaces_updated,
             interfaces_existing=result.interfaces_existing, interfaces_ignored=result.interfaces_ignored,
-            ips_created=result.ips_created, ips_existing=result.ips_existing, message=msg,
+            ips_created=result.ips_created, ips_existing=result.ips_existing,
+            vlans_created=result.vlans_created, iface_vlans_set=result.iface_vlans_set,
+            message=msg,
         )
         record_created_objects(run, result.created_objects)
         config.record_sync_result(
