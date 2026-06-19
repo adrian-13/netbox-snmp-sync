@@ -16,7 +16,7 @@ from rest_framework.test import APIClient
 from users.models import ObjectPermission
 
 from netbox_snmp_sync.tables import SNMP_TEST_BUTTON
-from netbox_snmp_sync.dto import DeviceData, InterfaceData, serialize_device_data
+from netbox_snmp_sync.dto import DeviceData, InterfaceData, VlanData, serialize_device_data
 from netbox_snmp_sync.models import DeviceSNMPConfig, SNMPSyncConfig, SyncRun
 
 User = get_user_model()
@@ -194,6 +194,53 @@ class SecurityTestCase(TestCase):
         self.assertTrue(apply_sync.call_args.kwargs["create_vlans"])
         run = self.cfg.device.snmp_sync_runs.latest("created")
         self.assertIn("VLANs set 1, created 1", run.message)
+
+    def test_preview_write_creates_and_assigns_vlans(self):
+        from dcim.models import Interface
+        from ipam.models import VLAN
+
+        settings = SNMPSyncConfig.get()
+        settings.write_vlans = True
+        settings.create_vlans = True
+        settings.save()
+        iface = Interface.objects.create(device=self.device, name="ether1", type="1000base-t", enabled=True)
+        data = DeviceData(target="10.0.0.1", sys_name="sw1")
+        data.interfaces[1] = InterfaceData(
+            if_index=1,
+            name=iface.name,
+            if_type=6,
+            nb_type="1000base-t",
+            access_vlan=30,
+            tagged_vlans=[45, 46],
+        )
+        data.vlans.extend([
+            VlanData(vid=30, name="Users"),
+            VlanData(vid=45, name="Guest"),
+            VlanData(vid=46, name="Mgmt"),
+        ])
+        self.cfg.target_override = "10.0.0.1"
+        self.cfg.save()
+        c = Client()
+        c.force_login(self.admin)
+        url = reverse("plugins:netbox_snmp_sync:devicesnmpconfig_preview", args=[self.cfg.pk])
+
+        with patch("netbox_snmp_sync.views._collect_blocking", return_value=data):
+            r = c.get(url)
+        self.assertEqual(r.status_code, 200)
+
+        r = c.post(url, {
+            "snapshot": json.dumps(serialize_device_data(data)),
+            "vlan_iface": [iface.name],
+        })
+
+        self.assertEqual(r.status_code, 302)
+        self.assertTrue(VLAN.objects.filter(vid=30, site=self.device.site).exists())
+        self.assertTrue(VLAN.objects.filter(vid=45, site=self.device.site).exists())
+        self.assertTrue(VLAN.objects.filter(vid=46, site=self.device.site).exists())
+        iface.refresh_from_db()
+        self.assertEqual(iface.mode, "tagged")
+        self.assertEqual(iface.untagged_vlan.vid, 30)
+        self.assertEqual(sorted(iface.tagged_vlans.values_list("vid", flat=True)), [45, 46])
 
     def test_syncrun_detail_shows_vlan_counters(self):
         run = SyncRun.objects.create(
