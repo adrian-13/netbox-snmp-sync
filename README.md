@@ -407,6 +407,11 @@ No internal NetBox code is imported directly.
 
 ## Changelog
 
+### v0.3.5
+- **Cisco VLAN discovery** - collect VLAN names from CISCO-VTP-MIB and port
+  membership from Cisco access/trunk VLAN MIBs when Q-BRIDGE membership tables
+  are not exposed in the default SNMP context.
+
 ### v0.3.4
 - **Sync run change details** - sync run detail pages now store and show field-level
   created/updated changes, including VLAN creation and interface VLAN membership updates.

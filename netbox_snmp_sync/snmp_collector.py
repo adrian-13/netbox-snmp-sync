@@ -49,10 +49,33 @@ OID_IP_AD_ENT_NETMASK = "1.3.6.1.2.1.4.20.1.3"
 
 # Q-BRIDGE-MIB dot1qVlanStaticName (indexed by VLAN ID)
 OID_DOT1Q_VLAN_STATIC_NAME = "1.3.6.1.2.1.17.7.1.4.3.1.1"
+# Q-BRIDGE-MIB PortList bitmaps. Current table is indexed by TimeFilter + VLAN ID;
+# static table is indexed by VLAN ID. PortList bits map to dot1dBasePort numbers.
+OID_DOT1Q_VLAN_CURRENT_EGRESS_PORTS = "1.3.6.1.2.1.17.7.1.4.2.1.4"
+OID_DOT1Q_VLAN_CURRENT_UNTAGGED_PORTS = "1.3.6.1.2.1.17.7.1.4.2.1.5"
+OID_DOT1Q_VLAN_STATIC_EGRESS_PORTS = "1.3.6.1.2.1.17.7.1.4.3.1.2"
+OID_DOT1Q_VLAN_STATIC_UNTAGGED_PORTS = "1.3.6.1.2.1.17.7.1.4.3.1.4"
 # Q-BRIDGE-MIB dot1qPvid — untagged/native VLAN per bridge port (indexed by dot1dBasePort).
 OID_DOT1Q_PVID = "1.3.6.1.2.1.17.7.1.4.5.1.1"
 # BRIDGE-MIB dot1dBasePortIfIndex — maps bridge-port number -> ifIndex.
 OID_DOT1D_BASE_PORT_IFINDEX = "1.3.6.1.2.1.17.1.4.1.2"
+
+# CISCO-VTP-MIB vtpVlanName, indexed by managementDomainIndex + VLAN ID. Some Catalyst
+# platforms expose VLAN names here even when the standard Q-BRIDGE static table is sparse.
+OID_CISCO_VTP_VLAN_NAME = "1.3.6.1.4.1.9.9.46.1.3.1.1.4"
+
+# CISCO-VLAN-MEMBERSHIP-MIB vmVlan (indexed by ifIndex): access VLAN for
+# non-trunk bridge ports.
+OID_CISCO_VM_VLAN = "1.3.6.1.4.1.9.9.68.1.2.2.1.2"
+
+# CISCO-VTP-MIB vlanTrunkPortTable (indexed by ifIndex). Enabled VLAN bitmaps
+# are split into 0-1023, 1024-2047, 2048-3071, and 3072-4095 ranges.
+OID_CISCO_TRUNK_VLANS_ENABLED = "1.3.6.1.4.1.9.9.46.1.6.1.1.4"
+OID_CISCO_TRUNK_NATIVE_VLAN = "1.3.6.1.4.1.9.9.46.1.6.1.1.5"
+OID_CISCO_TRUNK_DYNAMIC_STATUS = "1.3.6.1.4.1.9.9.46.1.6.1.1.14"
+OID_CISCO_TRUNK_VLANS_ENABLED_2K = "1.3.6.1.4.1.9.9.46.1.6.1.1.17"
+OID_CISCO_TRUNK_VLANS_ENABLED_3K = "1.3.6.1.4.1.9.9.46.1.6.1.1.18"
+OID_CISCO_TRUNK_VLANS_ENABLED_4K = "1.3.6.1.4.1.9.9.46.1.6.1.1.19"
 
 # ENTITY-MIB physical components — used to detect device model + chassis serial.
 # entPhysicalClass: 3 = chassis (the row we care about). modelName/serial then come from
@@ -155,6 +178,55 @@ def _format_mac(value) -> str | None:
     if mac == "00:00:00:00:00:00":
         return None
     return mac
+
+
+def _oid_suffix_vlan_id(suffix: str) -> int | None:
+    """Return the VLAN ID from a table suffix.
+
+    Q-BRIDGE static rows are indexed by VLAN ID (``10``), current rows by
+    TimeFilter + VLAN ID (``0.10``), and CISCO-VTP rows by domain + VLAN ID
+    (``1.10``). In all useful cases the last suffix component is the VID.
+    """
+    try:
+        vid = int(str(suffix).split(".")[-1])
+    except (TypeError, ValueError):
+        return None
+    return vid if 1 <= vid <= 4094 else None
+
+
+def _as_octets(value) -> bytes:
+    if value is None:
+        return b""
+    try:
+        return value.asOctets()
+    except AttributeError:
+        if isinstance(value, (bytes, bytearray)):
+            return bytes(value)
+    return b""
+
+
+def _port_list_bridge_ports(value) -> set[int]:
+    """Decode an SNMP PortList OCTET STRING into dot1dBasePort numbers."""
+    octets = _as_octets(value)
+    ports: set[int] = set()
+    for byte_index, byte in enumerate(octets):
+        for bit_index in range(8):
+            if byte & (1 << (7 - bit_index)):
+                ports.add(byte_index * 8 + bit_index + 1)
+    return ports
+
+
+def _vlan_list(value, *, base: int = 0) -> set[int]:
+    """Decode a Cisco VTP VLAN bitmap into VLAN IDs."""
+    octets = _as_octets(value)
+    vlans: set[int] = set()
+    for byte_index, byte in enumerate(octets):
+        for bit_index in range(8):
+            if byte & (1 << (7 - bit_index)):
+                vid = base + byte_index * 8 + bit_index
+                if 1 <= vid <= 4094:
+                    vlans.add(vid)
+    return vlans
 
 
 def _mask_to_prefix(mask_dotted: str) -> int | None:
@@ -433,11 +505,41 @@ async def _collect_vlans(engine, auth, target, device: DeviceData) -> list[VlanD
     except SnmpError:
         rows = {}
     for suffix, value in rows.items():
-        if not suffix.isdigit():
+        vid = _oid_suffix_vlan_id(suffix)
+        if vid is None:
             continue
-        by_vid[int(suffix)] = _to_str(value).strip()
+        by_vid[vid] = _to_str(value).strip()
 
-    # Source 2: VLAN sub-interfaces (parse VID from the dot-notation port token).
+    # Source 2: Cisco VTP VLAN names.
+    try:
+        rows = await _walk(engine, auth, target, OID_CISCO_VTP_VLAN_NAME)
+    except SnmpError:
+        rows = {}
+    for suffix, value in rows.items():
+        vid = _oid_suffix_vlan_id(suffix)
+        if vid is None:
+            continue
+        name = _to_str(value).strip()
+        if vid not in by_vid or (not by_vid[vid] and name):
+            by_vid[vid] = name
+
+    # Source 3: Q-BRIDGE membership bitmaps also reveal existing VLAN IDs.
+    for oid in (
+        OID_DOT1Q_VLAN_CURRENT_EGRESS_PORTS,
+        OID_DOT1Q_VLAN_CURRENT_UNTAGGED_PORTS,
+        OID_DOT1Q_VLAN_STATIC_EGRESS_PORTS,
+        OID_DOT1Q_VLAN_STATIC_UNTAGGED_PORTS,
+    ):
+        try:
+            rows = await _walk(engine, auth, target, oid)
+        except SnmpError:
+            rows = {}
+        for suffix in rows:
+            vid = _oid_suffix_vlan_id(suffix)
+            if vid is not None:
+                by_vid.setdefault(vid, "")
+
+    # Source 4: VLAN sub-interfaces (parse VID from the dot-notation port token).
     for iface in device.interfaces.values():
         port = _port_token(iface.name)
         if "." not in port:
@@ -485,7 +587,122 @@ async def _collect_port_vlans(engine, auth, target, device: DeviceData) -> None:
         if iface is not None:
             iface.access_vlan = pvid
 
-    # --- tagged VLANs (inferred from sub-interfaces) ---
+    # --- tagged VLANs from Q-BRIDGE PortList bitmaps ---
+    try:
+        current_egress = await _walk(engine, auth, target, OID_DOT1Q_VLAN_CURRENT_EGRESS_PORTS)
+    except SnmpError:
+        current_egress = {}
+    try:
+        current_untagged = await _walk(engine, auth, target, OID_DOT1Q_VLAN_CURRENT_UNTAGGED_PORTS)
+    except SnmpError:
+        current_untagged = {}
+    try:
+        static_egress = await _walk(engine, auth, target, OID_DOT1Q_VLAN_STATIC_EGRESS_PORTS)
+    except SnmpError:
+        static_egress = {}
+    try:
+        static_untagged = await _walk(engine, auth, target, OID_DOT1Q_VLAN_STATIC_UNTAGGED_PORTS)
+    except SnmpError:
+        static_untagged = {}
+
+    egress_rows = current_egress or static_egress
+    untagged_rows = current_untagged or static_untagged
+    untagged_by_vid: dict[int, set[int]] = {}
+    for suffix, value in untagged_rows.items():
+        vid = _oid_suffix_vlan_id(suffix)
+        if vid is not None:
+            untagged_by_vid.setdefault(vid, set()).update(_port_list_bridge_ports(value))
+
+    tagged_by_ifindex: dict[int, set[int]] = {}
+    untagged_by_ifindex: dict[int, set[int]] = {}
+    for suffix, value in egress_rows.items():
+        vid = _oid_suffix_vlan_id(suffix)
+        if vid is None or vid == 1:
+            continue
+        egress_ports = _port_list_bridge_ports(value)
+        untagged_ports = untagged_by_vid.get(vid, set())
+        for bridge_port in egress_ports - untagged_ports:
+            if_index = _to_int(ifindex_by_port.get(str(bridge_port)))
+            if if_index is not None:
+                tagged_by_ifindex.setdefault(if_index, set()).add(vid)
+        for bridge_port in untagged_ports:
+            if_index = _to_int(ifindex_by_port.get(str(bridge_port)))
+            if if_index is not None:
+                untagged_by_ifindex.setdefault(if_index, set()).add(vid)
+
+    for if_index, vids in untagged_by_ifindex.items():
+        iface = device.interfaces.get(if_index)
+        if iface is not None and iface.access_vlan is None and len(vids) == 1:
+            iface.access_vlan = next(iter(vids))
+    for if_index, vids in tagged_by_ifindex.items():
+        iface = device.interfaces.get(if_index)
+        if iface is not None:
+            iface.tagged_vlans = sorted(set(iface.tagged_vlans).union(vids))
+
+    # --- Cisco access and trunk VLANs ---
+    try:
+        vm_vlan = await _walk(engine, auth, target, OID_CISCO_VM_VLAN)
+    except SnmpError:
+        vm_vlan = {}
+    for suffix, vlan_val in vm_vlan.items():
+        if_index = _to_int(suffix)
+        vid = _to_int(vlan_val)
+        if if_index is None or vid is None or vid in (0, 1):
+            continue
+        iface = device.interfaces.get(if_index)
+        if iface is not None and iface.access_vlan is None:
+            iface.access_vlan = vid
+
+    try:
+        trunk_status = await _walk(engine, auth, target, OID_CISCO_TRUNK_DYNAMIC_STATUS)
+    except SnmpError:
+        trunk_status = {}
+    trunk_ifindexes = {
+        _to_int(suffix)
+        for suffix, status in trunk_status.items()
+        if _to_int(status) == 1
+    }
+    trunk_ifindexes.discard(None)
+    if trunk_ifindexes:
+        known_vlan_ids = {v.vid for v in device.vlans if v.vid not in (0, 1)}
+        try:
+            native_vlans = await _walk(engine, auth, target, OID_CISCO_TRUNK_NATIVE_VLAN)
+        except SnmpError:
+            native_vlans = {}
+        enabled_specs = (
+            (OID_CISCO_TRUNK_VLANS_ENABLED, 0),
+            (OID_CISCO_TRUNK_VLANS_ENABLED_2K, 1024),
+            (OID_CISCO_TRUNK_VLANS_ENABLED_3K, 2048),
+            (OID_CISCO_TRUNK_VLANS_ENABLED_4K, 3072),
+        )
+        enabled_by_ifindex: dict[int, set[int]] = {}
+        for oid, base in enabled_specs:
+            try:
+                rows = await _walk(engine, auth, target, oid)
+            except SnmpError:
+                rows = {}
+            for suffix, bitmap in rows.items():
+                if_index = _to_int(suffix)
+                if if_index not in trunk_ifindexes:
+                    continue
+                enabled = _vlan_list(bitmap, base=base)
+                if known_vlan_ids:
+                    enabled &= known_vlan_ids
+                enabled_by_ifindex.setdefault(if_index, set()).update(enabled)
+        for if_index, enabled in enabled_by_ifindex.items():
+            iface = device.interfaces.get(if_index)
+            if iface is None:
+                continue
+            native = _to_int(native_vlans.get(str(if_index)))
+            if native and native != 1 and iface.access_vlan is None:
+                iface.access_vlan = native
+            tagged = set(enabled)
+            if native:
+                tagged.discard(native)
+            if tagged:
+                iface.tagged_vlans = sorted(set(iface.tagged_vlans).union(tagged))
+
+    # --- tagged VLANs inferred from sub-interfaces ---
     # Map each parent interface NAME -> set of VIDs carried by its sub-interfaces.
     tagged_by_parent: dict[str, set[int]] = {}
     for iface in device.interfaces.values():
