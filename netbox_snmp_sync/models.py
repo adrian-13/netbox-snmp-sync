@@ -564,6 +564,25 @@ class SyncRunObject(models.Model):
         return self.object_repr or f"{self.object_type} #{self.object_id}"
 
 
+class SyncRunChange(models.Model):
+    """A field-level change recorded for a sync run."""
+
+    run = models.ForeignKey(SyncRun, on_delete=models.CASCADE, related_name="changes")
+    action = models.CharField(max_length=20)
+    object_type = models.CharField(max_length=50)
+    object_repr = models.CharField(max_length=200)
+    field = models.CharField(max_length=80, blank=True)
+    old_value = models.TextField(blank=True)
+    new_value = models.TextField(blank=True)
+    message = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ("pk",)
+
+    def __str__(self):
+        return f"{self.action} {self.object_type} {self.object_repr}"
+
+
 def record_created_objects(run: SyncRun, created_objects):
     """Persist the objects a sync created so the run can later be reverted."""
     for obj in created_objects:
@@ -572,6 +591,21 @@ def record_created_objects(run: SyncRun, created_objects):
             object_type=ContentType.objects.get_for_model(type(obj)),
             object_id=obj.pk,
             object_repr=str(obj)[:200],
+        )
+
+
+def record_sync_changes(run: SyncRun, changes):
+    """Persist field-level changes produced by the sync engine."""
+    for change in changes:
+        SyncRunChange.objects.create(
+            run=run,
+            action=str(change.action)[:20],
+            object_type=str(change.object_type)[:50],
+            object_repr=str(change.object_repr)[:200],
+            field=str(change.field or "")[:80],
+            old_value=str(change.old_value or ""),
+            new_value=str(change.new_value or ""),
+            message=str(change.message or ""),
         )
 
 

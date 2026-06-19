@@ -76,7 +76,7 @@ def _sync_one(config, *, mode, trigger, logger=None, user=None, reset_schedule=F
     Raises ``JobFailed`` on a hard failure (no target / SNMP error) after recording a failed
     SyncRun, so callers can either let the job error (manual) or catch and continue (scheduled).
     """
-    from .models import SyncRun, get_setting, record_created_objects
+    from .models import SyncRun, get_setting, record_created_objects, record_sync_changes
 
     device = config.device
     spec = config.to_spec()
@@ -134,7 +134,9 @@ def _sync_one(config, *, mode, trigger, logger=None, user=None, reset_schedule=F
             vlans_created=result.vlans_created, iface_vlans_set=result.iface_vlans_set,
             message=msg,
         )
-        record_created_objects(run, result.created_objects)
+        if mode == SyncModeChoices.APPLY:
+            record_created_objects(run, getattr(result, "created_objects", ()))
+            record_sync_changes(run, getattr(result, "changes", ()))
         config.record_sync_result(
             run,
             update_schedule=(trigger == SyncTriggerChoices.SCHEDULED or reset_schedule),

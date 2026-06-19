@@ -18,7 +18,7 @@ from . import engine, filtersets, forms, tables
 from .choices import SyncModeChoices, SyncStatusChoices, SyncTriggerChoices
 from .dto import deserialize_device_data, serialize_device_data
 from .jobs import SNMPSyncJob
-from .models import DeviceSNMPConfig, SNMPSyncConfig, SyncRun, get_setting, record_created_objects
+from .models import DeviceSNMPConfig, SNMPSyncConfig, SyncRun, get_setting, record_created_objects, record_sync_changes
 from .snmp_collector import collect_with_ping
 
 
@@ -356,7 +356,8 @@ class DeviceSNMPConfigPreviewView(LoginRequiredMixin, View):
             vlans_created=result.vlans_created, iface_vlans_set=result.iface_vlans_set,
             message=message,
         )
-        record_created_objects(run, result.created_objects)
+        record_created_objects(run, getattr(result, "created_objects", ()))
+        record_sync_changes(run, getattr(result, "changes", ()))
         config.record_sync_result(run, update_schedule=False)
         messages.success(
             request,

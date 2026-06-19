@@ -241,6 +241,11 @@ class SecurityTestCase(TestCase):
         self.assertEqual(iface.mode, "tagged")
         self.assertEqual(iface.untagged_vlan.vid, 30)
         self.assertEqual(sorted(iface.tagged_vlans.values_list("vid", flat=True)), [45, 46])
+        run = self.cfg.device.snmp_sync_runs.latest("created")
+        changes = list(run.changes.values_list("action", "object_type", "object_repr", "field"))
+        self.assertIn(("created", "vlan", "VLAN 30", "site"), changes)
+        self.assertIn(("updated", "interface", "ether1", "untagged_vlan"), changes)
+        self.assertIn(("updated", "interface", "ether1", "tagged_vlans"), changes)
 
     def test_syncrun_detail_shows_vlan_counters(self):
         run = SyncRun.objects.create(
@@ -253,6 +258,14 @@ class SecurityTestCase(TestCase):
             vlans_created=3,
             iface_vlans_set=4,
         )
+        run.changes.create(
+            action="updated",
+            object_type="interface",
+            object_repr="ether1",
+            field="tagged_vlans",
+            old_value="",
+            new_value="45, 46",
+        )
         c = Client()
         c.force_login(self.admin)
 
@@ -263,6 +276,9 @@ class SecurityTestCase(TestCase):
         self.assertContains(r, "VLANs set")
         self.assertContains(r, ">3<")
         self.assertContains(r, ">4<")
+        self.assertContains(r, "Changes")
+        self.assertContains(r, "tagged_vlans")
+        self.assertContains(r, "45, 46")
 
     def test_sync_action_does_not_accept_get(self):
         c = Client()

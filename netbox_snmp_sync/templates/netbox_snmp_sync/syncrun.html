@@ -52,6 +52,33 @@
 <div class="row">
   <div class="col col-md-12">
     <div class="card">
+      <h2 class="card-header">Changes <span class="badge text-bg-grey">{{ object.changes.count }}</span></h2>
+      <table class="table table-hover">
+        <thead>
+          <tr><th>Action</th><th>Type</th><th>Object</th><th>Field</th><th>Old</th><th>New</th><th>Message</th></tr>
+        </thead>
+        <tbody>
+          {% for change in object.changes.all %}
+          <tr>
+            <td><span class="badge text-bg-blue">{{ change.action }}</span></td>
+            <td>{{ change.object_type }}</td>
+            <td>{{ change.object_repr }}</td>
+            <td>{{ change.field|placeholder }}</td>
+            <td>{{ change.old_value|placeholder }}</td>
+            <td>{{ change.new_value|placeholder }}</td>
+            <td>{{ change.message|placeholder }}</td>
+          </tr>
+          {% empty %}
+          <tr><td colspan="7" class="text-muted">No field-level changes were recorded for this run.</td></tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+<div class="row">
+  <div class="col col-md-12">
+    <div class="card">
       <h2 class="card-header">Created objects <span class="badge text-bg-grey">{{ object.created_objects.count }}</span></h2>
       <table class="table table-hover">
         <thead><tr><th>Type</th><th>Object</th></tr></thead>

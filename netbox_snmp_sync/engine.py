@@ -35,6 +35,17 @@ IGNORED = "ignored"
 # ─────────────────────────────── result/diff types ───────────────────────────────
 
 @dataclass
+class SyncChange:
+    action: str
+    object_type: str
+    object_repr: str
+    field: str = ""
+    old_value: str = ""
+    new_value: str = ""
+    message: str = ""
+
+
+@dataclass
 class SyncResult:
     interfaces_created: int = 0
     interfaces_existing: int = 0
@@ -46,6 +57,7 @@ class SyncResult:
     iface_vlans_set: int = 0     # interfaces whose VLAN membership we wrote
     warnings: list[str] = field(default_factory=list)
     created_objects: list = field(default_factory=list)  # model instances we created (for revert)
+    changes: list[SyncChange] = field(default_factory=list)
 
 
 @dataclass
@@ -95,6 +107,14 @@ def _ch(name: str, old, new) -> dict:
         "old": "—" if old in (None, "") else str(old),
         "new": "—" if new in (None, "") else str(new),
     }
+
+
+def _value(value) -> str:
+    if value in (None, ""):
+        return ""
+    if isinstance(value, (list, tuple, set)):
+        return ", ".join(str(v) for v in value)
+    return str(value)
 
 
 def _iface_changes(iface, rec: Interface, nb_type: str) -> list[dict]:
@@ -245,11 +265,18 @@ def apply_sync(
             name_to_iface.setdefault(normalize_port_name(iface.name), new)
             created[iface.name] = new
             result.created_objects.append(new)
+            result.changes.append(SyncChange(
+                action="created",
+                object_type="interface",
+                object_repr=iface.name,
+                field="type",
+                new_value=iface.nb_type,
+            ))
             if set_mac_address and iface.mac:
                 _assign_mac(new, iface.mac)
         result.interfaces_created += 1
 
-    _set_parents(data, created, name_to_iface, dry_run)
+    _set_parents(data, created, name_to_iface, result, dry_run)
     _update_existing(update_targets, name_to_iface, result, dry_run, prefix)
     _sync_ips(data, valid_iface_names, name_to_iface, result, dry_run, prefix)
     if write_vlans:
@@ -307,6 +334,14 @@ def _sync_iface_vlans(device, data: DeviceData, name_to_iface: dict, result: Syn
             vid_to_vlan[vid] = vlan
             result.vlans_created += 1
             result.created_objects.append(vlan)
+            result.changes.append(SyncChange(
+                action="created",
+                object_type="vlan",
+                object_repr=f"VLAN {vid}",
+                field="site",
+                new_value=_value(site),
+                message=vname,
+            ))
             log.info("%screated VLAN %s (%s)", prefix, vid, vname)
         except Exception as exc:  # noqa: BLE001
             result.warnings.append(f"VLAN {vid} ({vname}): create failed: {exc}")
@@ -341,9 +376,25 @@ def _sync_iface_vlans(device, data: DeviceData, name_to_iface: dict, result: Syn
         try:
             changed = False
             if rec.mode != desired_mode:
+                result.changes.append(SyncChange(
+                    action="updated",
+                    object_type="interface",
+                    object_repr=rec.name,
+                    field="mode",
+                    old_value=_value(rec.mode),
+                    new_value=_value(desired_mode),
+                ))
                 rec.mode = desired_mode
                 changed = True
             if desired_untagged is not None and rec.untagged_vlan_id != desired_untagged.pk:
+                result.changes.append(SyncChange(
+                    action="updated",
+                    object_type="interface",
+                    object_repr=rec.name,
+                    field="untagged_vlan",
+                    old_value=_value(rec.untagged_vlan),
+                    new_value=_value(desired_untagged),
+                ))
                 rec.untagged_vlan = desired_untagged
                 changed = True
             if changed:
@@ -352,6 +403,16 @@ def _sync_iface_vlans(device, data: DeviceData, name_to_iface: dict, result: Syn
                 want = sorted(v.pk for v in desired_tagged)
                 cur = sorted(rec.tagged_vlans.values_list("pk", flat=True))
                 if cur != want:
+                    old_tagged = list(rec.tagged_vlans.order_by("vid").values_list("vid", flat=True))
+                    new_tagged = sorted(v.vid for v in desired_tagged)
+                    result.changes.append(SyncChange(
+                        action="updated",
+                        object_type="interface",
+                        object_repr=rec.name,
+                        field="tagged_vlans",
+                        old_value=_value(old_tagged),
+                        new_value=_value(new_tagged),
+                    ))
                     rec.tagged_vlans.set(desired_tagged)
                     changed = True
             if changed:
@@ -360,7 +421,7 @@ def _sync_iface_vlans(device, data: DeviceData, name_to_iface: dict, result: Syn
             result.warnings.append(f"{iface.name}: VLAN write failed: {exc}")
 
 
-def _set_parents(data: DeviceData, created: dict, name_to_iface: dict, dry_run: bool):
+def _set_parents(data: DeviceData, created: dict, name_to_iface: dict, result: SyncResult, dry_run: bool):
     """Second pass: link newly created sub-interfaces to their parent interface."""
     for iface in data.interfaces.values():
         rec = created.get(iface.name)
@@ -371,36 +432,52 @@ def _set_parents(data: DeviceData, created: dict, name_to_iface: dict, dry_run: 
             continue
         if not dry_run:
             try:
+                result.changes.append(SyncChange(
+                    action="updated",
+                    object_type="interface",
+                    object_repr=rec.name,
+                    field="parent",
+                    old_value=_value(rec.parent),
+                    new_value=_value(parent),
+                ))
                 rec.parent = parent
                 rec.save()
             except Exception as exc:  # noqa: BLE001
                 log.warning("interface %s: could not set parent %s: %s", iface.name, iface.parent_name, exc)
+                result.changes.append(SyncChange("warning", "interface", iface.name, message=f"could not set parent {iface.parent_name}: {exc}"))
 
 
 def _update_existing(update_targets, name_to_iface, result: SyncResult, dry_run: bool, prefix: str):
     for iface, rec in update_targets:
         changed = False
         if rec.type != iface.nb_type:
+            result.changes.append(SyncChange("updated", "interface", rec.name, "type", _value(rec.type), _value(iface.nb_type)))
             rec.type = iface.nb_type
             changed = True
         if iface.mtu and rec.mtu != iface.mtu:
+            result.changes.append(SyncChange("updated", "interface", rec.name, "mtu", _value(rec.mtu), _value(iface.mtu)))
             rec.mtu = iface.mtu
             changed = True
         if iface.speed_kbps and rec.speed != iface.speed_kbps:
+            result.changes.append(SyncChange("updated", "interface", rec.name, "speed", _value(rec.speed), _value(iface.speed_kbps)))
             rec.speed = iface.speed_kbps
             changed = True
         if iface.duplex and rec.duplex != iface.duplex:
+            result.changes.append(SyncChange("updated", "interface", rec.name, "duplex", _value(rec.duplex), _value(iface.duplex)))
             rec.duplex = iface.duplex
             changed = True
         if rec.enabled != iface.enabled:
+            result.changes.append(SyncChange("updated", "interface", rec.name, "enabled", _value(rec.enabled), _value(iface.enabled)))
             rec.enabled = iface.enabled
             changed = True
         if iface.description and (rec.description or "") != iface.description:
+            result.changes.append(SyncChange("updated", "interface", rec.name, "description", _value(rec.description), _value(iface.description)))
             rec.description = iface.description
             changed = True
         if iface.parent_name:
             parent = name_to_iface.get(iface.parent_name) or name_to_iface.get(normalize_port_name(iface.parent_name))
             if parent and (rec.parent_id != parent.pk):
+                result.changes.append(SyncChange("updated", "interface", rec.name, "parent", _value(rec.parent), _value(parent)))
                 rec.parent = parent
                 changed = True
         if not changed:
@@ -412,6 +489,7 @@ def _update_existing(update_targets, name_to_iface, result: SyncResult, dry_run:
                 rec.save()
             except Exception as exc:  # noqa: BLE001
                 result.warnings.append(f"{iface.name}: update failed: {exc}")
+                result.changes.append(SyncChange("warning", "interface", iface.name, message=f"update failed: {exc}"))
                 continue
         result.interfaces_updated += 1
 
@@ -435,4 +513,11 @@ def _sync_ips(data: DeviceData, valid_iface_names: set[str], name_to_iface: dict
             iface = name_to_iface.get(iface_name) or name_to_iface.get(normalize_port_name(iface_name))
             ip_obj = IPAddress.objects.create(address=ip.address, status="active", assigned_object=iface)
             result.created_objects.append(ip_obj)
+            result.changes.append(SyncChange(
+                action="created",
+                object_type="ipaddress",
+                object_repr=ip.address,
+                field="interface",
+                new_value=iface_name,
+            ))
         result.ips_created += 1
