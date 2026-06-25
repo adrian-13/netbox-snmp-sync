@@ -45,6 +45,19 @@ def _vlan_preview_rows(data):
     return rows
 
 
+def _rename_device_to_sysname_pending(config, data):
+    sys_name = (data.sys_name or "").strip()
+    return bool(config.rename_device_to_sysname and sys_name and config.device.name != sys_name)
+
+
+def _device_rename_messages(result):
+    messages = []
+    for change in getattr(result, "changes", ()):
+        if change.object_type == "device" and change.field == "name":
+            messages.append(f"renamed device {change.old_value} -> {change.new_value}")
+    return messages
+
+
 def _evaluate(spec):
     """Network-only SNMP probe of an already-resolved spec. Returns ``(ok, message)``.
 
@@ -304,6 +317,9 @@ class DeviceSNMPConfigPreviewView(LoginRequiredMixin, View):
         return render(request, self.template_name, {
             "object": config,
             "device": config.device,
+            "sys_name": data.sys_name,
+            "rename_device_to_sysname": config.rename_device_to_sysname,
+            "rename_device_pending": _rename_device_to_sysname_pending(config, data),
             "diff": diff,
             "vlan_rows": _vlan_preview_rows(data),
             "write_vlans_enabled": bool(get_setting("write_vlans")),
@@ -330,7 +346,8 @@ class DeviceSNMPConfigPreviewView(LoginRequiredMixin, View):
         selected_interface_names = selected_ifaces | selected_vlan_ifaces
         data.interfaces = {i: f for i, f in data.interfaces.items() if f.name in selected_interface_names}
         data.ip_addresses = [ip for ip in data.ip_addresses if ip.address in selected_ips]
-        if not data.interfaces and not data.ip_addresses:
+        rename_device_pending = _rename_device_to_sysname_pending(config, data)
+        if not data.interfaces and not data.ip_addresses and not rename_device_pending:
             messages.warning(request, "Nothing selected to write.")
             return redirect(reverse("plugins:netbox_snmp_sync:devicesnmpconfig_preview", args=[pk]))
 
@@ -340,13 +357,18 @@ class DeviceSNMPConfigPreviewView(LoginRequiredMixin, View):
             set_mac_address=bool(get_setting("set_mac_address")),
             write_vlans=write_vlans,
             create_vlans=create_vlans,
+            rename_device_to_sysname=bool(config.rename_device_to_sysname),
         )
         message = (
             f"Interactive write: {result.interfaces_created} interfaces, {result.ips_created} IPs selected; "
-            f"VLANs set {result.iface_vlans_set}, created {result.vlans_created}"
+            f"VLANs set {result.iface_vlans_set}, created {result.vlans_created}; "
+            f"devices renamed {result.devices_updated}"
         )
         if result.warnings:
             message += "; " + "; ".join(result.warnings)
+        rename_messages = _device_rename_messages(result)
+        if rename_messages:
+            message += "; " + "; ".join(rename_messages)
         run = SyncRun.objects.create(
             device=config.device, trigger=SyncTriggerChoices.MANUAL, mode=SyncModeChoices.APPLY,
             status=SyncStatusChoices.OK,
@@ -362,7 +384,8 @@ class DeviceSNMPConfigPreviewView(LoginRequiredMixin, View):
         messages.success(
             request,
             f"Wrote {result.interfaces_created} interface(s), {result.ips_created} IP(s), "
-            f"set VLANs on {result.iface_vlans_set} interface(s), created {result.vlans_created} VLAN(s).",
+            f"set VLANs on {result.iface_vlans_set} interface(s), created {result.vlans_created} VLAN(s), "
+            f"renamed {result.devices_updated} device(s).",
         )
         return redirect(config.device.get_absolute_url())
 

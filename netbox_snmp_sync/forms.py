@@ -46,6 +46,7 @@ class DeviceSNMPConfigForm(SyncHoursFormMixin, NetBoxModelForm):
             "target_override",
             "default_ethernet_type",
             "skip_loopback_ips",
+            "rename_device_to_sysname",
             "sync_interval_hours",
             "sync_at_hours",
             "tags",
@@ -65,6 +66,7 @@ class DeviceSNMPConfigBulkEditForm(SyncHoursFormMixin, NetBoxModelBulkEditForm):
     retries = forms.IntegerField(required=False, min_value=0)
     target_override = forms.CharField(required=False)
     skip_loopback_ips = forms.NullBooleanField(required=False, widget=BulkEditNullBooleanSelect())
+    rename_device_to_sysname = forms.NullBooleanField(required=False, widget=BulkEditNullBooleanSelect())
     sync_interval_hours = forms.IntegerField(required=False, min_value=0)
     sync_at_hours = forms.CharField(required=False)
 
@@ -84,6 +86,7 @@ class DeviceSNMPConfigImportForm(SyncHoursFormMixin, NetBoxModelImportForm):
             "device", "enabled", "snmp_version", "port", "community",
             "username", "auth_protocol", "auth_key", "priv_protocol", "priv_key",
             "timeout", "retries", "target_override", "default_ethernet_type", "skip_loopback_ips",
+            "rename_device_to_sysname",
             "sync_interval_hours", "sync_at_hours",
         )
 

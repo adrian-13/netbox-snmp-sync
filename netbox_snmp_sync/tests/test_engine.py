@@ -78,6 +78,33 @@ class EngineTestCase(TestCase):
         self.assertEqual(result.interfaces_created, 3)
         self.assertEqual(Interface.objects.filter(device=self.device).count(), 0)
 
+    def test_apply_can_rename_device_to_sysname(self):
+        data = _device_data()
+        data.sys_name = "sw1-snmp"
+
+        result = engine.apply_sync(self.device, data, dry_run=False, rename_device_to_sysname=True)
+
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.name, "sw1-snmp")
+        self.assertEqual(result.devices_updated, 1)
+        self.assertTrue(any(
+            change.object_type == "device"
+            and change.field == "name"
+            and change.old_value == "sw1"
+            and change.new_value == "sw1-snmp"
+            for change in result.changes
+        ))
+
+    def test_apply_does_not_rename_device_without_flag(self):
+        data = _device_data()
+        data.sys_name = "sw1-snmp"
+
+        result = engine.apply_sync(self.device, data, dry_run=False)
+
+        self.device.refresh_from_db()
+        self.assertEqual(self.device.name, "sw1")
+        self.assertEqual(result.devices_updated, 0)
+
     def test_vlan_membership(self):
         VLAN.objects.create(vid=10, name="ten", site=self.device.site)
         VLAN.objects.create(vid=20, name="twenty", site=self.device.site)

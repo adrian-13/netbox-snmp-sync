@@ -14,6 +14,25 @@
   <input type="hidden" name="snapshot" value="{{ snapshot }}">
 
   <div class="card mb-3">
+    <h2 class="card-header">System info</h2>
+    <table class="table table-hover attr-table">
+      <tr><th scope="row">NetBox device name</th><td>{{ device.name }}</td></tr>
+      <tr><th scope="row">SNMP sysName</th><td>{{ sys_name|placeholder }}</td></tr>
+      <tr><th scope="row">Rename device to sysName</th><td>{{ rename_device_to_sysname|yesno:"Yes,No" }}</td></tr>
+      <tr><th scope="row">Rename on write</th><td>
+        {% if rename_device_pending %}
+          <span class="badge text-bg-orange">CHANGED</span>
+          {{ device.name }} -> {{ sys_name }}
+        {% elif rename_device_to_sysname %}
+          <span class="badge text-bg-blue">no change</span>
+        {% else %}
+          <span class="text-muted">disabled</span>
+        {% endif %}
+      </td></tr>
+    </table>
+  </div>
+
+  <div class="card mb-3">
     <h2 class="card-header">Interfaces</h2>
     <table class="table table-hover">
       <thead>

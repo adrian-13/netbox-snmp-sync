@@ -51,6 +51,7 @@
     <tr><th scope="row">Port</th><td>{{ snmp_config.port }}</td></tr>
     <tr><th scope="row">Community</th><td>{{ snmp_config.community|placeholder }}</td></tr>
     <tr><th scope="row">Target</th><td>{{ snmp_config.target|placeholder }}</td></tr>
+    <tr><th scope="row">Rename to sysName</th><td>{{ snmp_config.rename_device_to_sysname|yesno:"Yes,No" }}</td></tr>
     <tr><th scope="row">Schedule</th><td>
       <span class="badge text-bg-{{ snmp_config.schedule_color }}">{{ snmp_config.schedule_label }}</span>
     </td></tr>

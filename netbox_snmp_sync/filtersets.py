@@ -7,7 +7,7 @@ class DeviceSNMPConfigFilterSet(NetBoxModelFilterSet):
     class Meta:
         model = DeviceSNMPConfig
         fields = (
-            "id", "device", "enabled", "snmp_version", "port",
+            "id", "device", "enabled", "snmp_version", "port", "rename_device_to_sysname",
             "sync_interval_hours", "sync_at_hours",
             "last_sync_status", "next_sync_at",
         )

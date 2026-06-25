@@ -94,6 +94,11 @@ Each device gets its own SNMP configuration, accessible from the device detail p
 | **Sync all** | SNMP poll → add-only write of all new interfaces and IPs to NetBox. |
 | **Scheduled sync** | System job that runs hourly and queues a per-device sync for every enabled device that has not been synced within the configured interval. |
 
+Per-device SNMP settings also include **Rename device to sysName**. When enabled, apply
+syncs rename the NetBox device to the collected SNMP `sysName`; read-only tests and
+compare runs do not rename devices. Preview shows the collected `sysName` before writing,
+and successful renames are recorded in the sync run message and change log.
+
 ### History and audit
 
 - **SyncRun model** — every run (manual or scheduled) is stored in the database with:

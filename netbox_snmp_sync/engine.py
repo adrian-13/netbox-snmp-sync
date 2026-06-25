@@ -47,6 +47,7 @@ class SyncChange:
 
 @dataclass
 class SyncResult:
+    devices_updated: int = 0
     interfaces_created: int = 0
     interfaces_existing: int = 0
     interfaces_ignored: int = 0
@@ -206,6 +207,7 @@ def apply_sync(
     set_mac_address: bool = True,
     write_vlans: bool = False,
     create_vlans: bool = False,
+    rename_device_to_sysname: bool = False,
     ignore_patterns: tuple[str, ...] = (),
 ) -> SyncResult:
     """Add-only sync of ``data`` into the NetBox ``device`` via the ORM.
@@ -216,6 +218,12 @@ def apply_sync(
     """
     result = SyncResult()
     prefix = "[DRY-RUN] would " if dry_run else ""
+    _rename_device_to_sysname(
+        device, data, result,
+        dry_run=dry_run,
+        enabled=rename_device_to_sysname,
+        prefix=prefix,
+    )
     ignore_res = [re.compile(p) for p in ignore_patterns]
     by_norm, by_actual = _existing_interfaces(device)
 
@@ -282,6 +290,45 @@ def apply_sync(
     if write_vlans:
         _sync_iface_vlans(device, data, name_to_iface, result, dry_run=dry_run, create_vlans=create_vlans, prefix=prefix)
     return result
+
+
+def _rename_device_to_sysname(
+    device,
+    data: DeviceData,
+    result: SyncResult,
+    *,
+    dry_run: bool,
+    enabled: bool,
+    prefix: str,
+):
+    if not enabled:
+        return
+    sys_name = (data.sys_name or "").strip()
+    if not sys_name or device.name == sys_name:
+        return
+
+    old_name = device.name
+    log.info("%srename device %s to %s", prefix, old_name, sys_name)
+    result.devices_updated += 1
+    result.changes.append(SyncChange(
+        action="updated",
+        object_type="device",
+        object_repr=old_name,
+        field="name",
+        old_value=old_name,
+        new_value=sys_name,
+    ))
+    if dry_run:
+        return
+
+    try:
+        device.name = sys_name
+        device.save()
+    except Exception as exc:  # noqa: BLE001
+        device.name = old_name
+        result.devices_updated -= 1
+        result.changes.pop()
+        result.warnings.append(f"Device rename to sysName {sys_name!r} failed: {exc}")
 
 
 def _sync_iface_vlans(device, data: DeviceData, name_to_iface: dict, result: SyncResult,

@@ -26,6 +26,15 @@ SCHEDULE_CHECK_INTERVAL_MINUTES = 5
 SYSTEM_USERNAME = "netbox-snmp-sync"
 
 
+def _device_rename_messages(result, *, dry_run=False):
+    messages = []
+    verb = "would rename" if dry_run else "renamed"
+    for change in getattr(result, "changes", ()):
+        if change.object_type == "device" and change.field == "name":
+            messages.append(f"{verb} device {change.old_value} -> {change.new_value}")
+    return messages
+
+
 def _system_user():
     """Return a local service user for scheduled writes so NetBox change logging has a username."""
     user_model = get_user_model()
@@ -119,13 +128,19 @@ def _sync_one(config, *, mode, trigger, logger=None, user=None, reset_schedule=F
                 set_mac_address=bool(get_setting("set_mac_address")),
                 write_vlans=bool(get_setting("write_vlans")),
                 create_vlans=bool(get_setting("create_vlans")),
+                rename_device_to_sysname=bool(config.rename_device_to_sysname),
             )
         verb = "would create" if mode == SyncModeChoices.DRY_RUN else "created"
+        rename_verb = "would rename" if mode == SyncModeChoices.DRY_RUN else "renamed"
         summary = (f"{verb} {result.interfaces_created} interfaces, {result.ips_created} IPs; "
                    f"updated {result.interfaces_updated}, existing {result.interfaces_existing}, "
                    f"ignored {result.interfaces_ignored}; "
-                   f"VLANs set {result.iface_vlans_set}, created {result.vlans_created}")
+                   f"VLANs set {result.iface_vlans_set}, created {result.vlans_created}; "
+                   f"devices {rename_verb} {result.devices_updated}")
         msg = summary + (("; " + "; ".join(result.warnings)) if result.warnings else "")
+        rename_messages = _device_rename_messages(result, dry_run=(mode == SyncModeChoices.DRY_RUN))
+        if rename_messages:
+            msg += "; " + "; ".join(rename_messages)
         run = SyncRun.objects.create(
             device=device, trigger=trigger, mode=mode, status=SyncStatusChoices.OK,
             interfaces_created=result.interfaces_created, interfaces_updated=result.interfaces_updated,
@@ -142,6 +157,8 @@ def _sync_one(config, *, mode, trigger, logger=None, user=None, reset_schedule=F
             update_schedule=(trigger == SyncTriggerChoices.SCHEDULED or reset_schedule),
         )
         _log("info", summary)
+        for rename_message in rename_messages:
+            _log("info", rename_message)
         for w in result.warnings:
             _log("warning", w)
         return summary

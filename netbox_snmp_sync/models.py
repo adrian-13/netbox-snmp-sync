@@ -89,6 +89,11 @@ class DeviceSNMPConfig(NetBoxModel):
         help_text="NetBox interface type used when SNMP can't determine one. Blank = plugin default.",
     )
     skip_loopback_ips = models.BooleanField(default=True)
+    rename_device_to_sysname = models.BooleanField(
+        default=False,
+        verbose_name="Rename device to sysName",
+        help_text="When applying SNMP sync, rename the NetBox device to the collected SNMP sysName.",
+    )
     sync_interval_hours = models.PositiveIntegerField(
         null=True,
         blank=True,
