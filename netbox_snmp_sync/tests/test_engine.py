@@ -385,6 +385,7 @@ class DeviceSNMPConfigTestCase(TestCase):
                 "sync_interval_hours": 8,
                 "sync_at_hours": "",
                 "sync_job_timeout_seconds": settings.sync_job_timeout_seconds,
+                "sync_stale_job_marker_minutes": settings.sync_stale_job_marker_minutes,
                 "update_existing": settings.update_existing,
                 "set_mac_address": settings.set_mac_address,
                 "write_vlans": settings.write_vlans,
@@ -421,6 +422,7 @@ class DeviceSNMPConfigTestCase(TestCase):
                 "sync_interval_hours": 8,
                 "sync_at_hours": "",
                 "sync_job_timeout_seconds": settings.sync_job_timeout_seconds,
+                "sync_stale_job_marker_minutes": settings.sync_stale_job_marker_minutes,
                 "update_existing": settings.update_existing,
                 "set_mac_address": settings.set_mac_address,
                 "write_vlans": settings.write_vlans,
@@ -461,6 +463,7 @@ class DeviceSNMPConfigTestCase(TestCase):
                 "sync_interval_hours": 8,
                 "sync_at_hours": "",
                 "sync_job_timeout_seconds": settings.sync_job_timeout_seconds,
+                "sync_stale_job_marker_minutes": settings.sync_stale_job_marker_minutes,
                 "update_existing": settings.update_existing,
                 "set_mac_address": settings.set_mac_address,
                 "write_vlans": settings.write_vlans,
@@ -610,6 +613,18 @@ class DeviceSNMPConfigTestCase(TestCase):
         cfg.refresh_from_db()
         self.assertIsNone(cfg.sync_job_id)
         self.assertEqual(cfg.sync_state, "disabled")
+        self.assertIn("Cleared stale SNMP sync marker", cfg.last_sync_message)
+
+    def test_stale_sync_job_marker_uses_configured_timeout(self):
+        SNMPSyncConfig.objects.create(sync_stale_job_marker_minutes=30)
+        cfg = DeviceSNMPConfig.objects.create(device=self.device, snmp_version="2c", community="public")
+        job_id = "11111111-1111-1111-1111-111111111111"
+        Job.objects.create(name="SNMP Sync", job_id=job_id, status="running")
+        cfg.mark_sync_started(job_id, reference=timezone.now() - timedelta(minutes=45))
+
+        self.assertFalse(cfg.has_active_sync_job())
+        cfg.refresh_from_db()
+        self.assertIsNone(cfg.sync_job_id)
 
     def test_sync_job_marker_is_cleared_when_netbox_job_is_finished(self):
         cfg = DeviceSNMPConfig.objects.create(device=self.device, snmp_version="2c", community="public")

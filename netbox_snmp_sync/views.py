@@ -249,6 +249,46 @@ class DeviceSNMPConfigBulkTestView(LoginRequiredMixin, View):
         })
 
 
+@register_model_view(DeviceSNMPConfig, "bulk_reconcile_markers", path="reconcile-markers", detail=False)
+class DeviceSNMPConfigBulkReconcileMarkersView(LoginRequiredMixin, View):
+    """Clear stale queued/running sync markers for selected SNMP configs."""
+
+    list_url = "plugins:netbox_snmp_sync:devicesnmpconfig_list"
+
+    def post(self, request):
+        if not request.user.has_perm("netbox_snmp_sync.change_devicesnmpconfig"):
+            messages.error(request, "You do not have permission to change SNMP scheduling.")
+            return redirect(self.list_url)
+
+        if request.POST.get("_all"):
+            qs = DeviceSNMPConfig.objects.all()
+        else:
+            qs = DeviceSNMPConfig.objects.filter(pk__in=request.POST.getlist("pk"))
+        configs = list(qs.select_related("device"))
+        if not configs:
+            messages.warning(request, "No SNMP configurations selected.")
+            return redirect(self.list_url)
+
+        now = timezone.now()
+        cleared = 0
+        active = 0
+        no_marker = 0
+        for config in configs:
+            if not config.sync_job_id:
+                no_marker += 1
+                continue
+            if config.clear_stale_sync_job(now):
+                cleared += 1
+            else:
+                active += 1
+
+        messages.success(
+            request,
+            f"Reconciled SNMP sync markers: cleared {cleared}, still active/recent {active}, no marker {no_marker}.",
+        )
+        return redirect(self.list_url)
+
+
 @register_model_view(DeviceSNMPConfig, name="reset_schedule", path="reset-schedule")
 class DeviceSNMPConfigResetScheduleView(LoginRequiredMixin, View):
     """Recalculate one config's next scheduled sync from its current effective schedule."""

@@ -98,6 +98,7 @@ class SNMPSyncConfigForm(NetBoxModelForm):
         model = SNMPSyncConfig
         fields = (
             "sync_interval_hours", "sync_at_hours", "sync_job_timeout_seconds",
+            "sync_stale_job_marker_minutes",
             "update_existing", "set_mac_address", "write_vlans", "create_vlans",
             "history_keep_days", "history_keep_count",
         )

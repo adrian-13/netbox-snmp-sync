@@ -11,6 +11,11 @@
             class="btn btn-cyan btn-sm">
       <i class="mdi mdi-access-point-check"></i> Test selected
     </button>
+    <button type="submit" name="_reconcile_markers" formnovalidate
+            formaction="{% url 'plugins:netbox_snmp_sync:devicesnmpconfig_bulk_reconcile_markers' %}"
+            class="btn btn-warning btn-sm">
+      <i class="mdi mdi-broom"></i> Reconcile markers
+    </button>
     {% action_buttons actions model multi=True %}
   </div>
 {% endblock %}

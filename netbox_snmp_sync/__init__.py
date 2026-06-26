@@ -47,6 +47,8 @@ class NetBoxSNMPSyncConfig(PluginConfig):
         "sync_at_hours": "",
         # background job safety limit; 0 disables the wrapper timeout
         "sync_job_timeout_seconds": 300,
+        # stale queued/running marker recovery after worker/container restarts; 0 disables
+        "sync_stale_job_marker_minutes": 120,
         # history retention (daily prune job): keep at most N runs and/or runs newer than D days
         "history_keep_days": 90,
         "history_keep_count": 1000,

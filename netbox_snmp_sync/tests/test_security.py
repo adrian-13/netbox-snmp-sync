@@ -119,6 +119,7 @@ class SecurityTestCase(TestCase):
             ("devicesnmpconfig_sync", [self.cfg.pk]),
             ("devicesnmpconfig_reset_schedule", [self.cfg.pk]),
             ("devicesnmpconfig_reconcile_marker", [self.cfg.pk]),
+            ("devicesnmpconfig_bulk_reconcile_markers", []),
             ("bulk_setup", []),
         ]:
             url = reverse(f"plugins:netbox_snmp_sync:{name}", args=args)
@@ -440,6 +441,45 @@ class SecurityTestCase(TestCase):
         url = reverse("plugins:netbox_snmp_sync:devicesnmpconfig_reconcile_marker", args=[self.cfg.pk])
 
         r = c.post(url)
+
+        self.assertEqual(r.status_code, 302)
+        self.cfg.refresh_from_db()
+        self.assertIsNone(self.cfg.sync_job_id)
+
+    def test_bulk_reconcile_markers_action_does_not_accept_get(self):
+        c = Client()
+        c.force_login(self.admin)
+        url = reverse("plugins:netbox_snmp_sync:devicesnmpconfig_bulk_reconcile_markers")
+
+        r = c.get(url)
+
+        self.assertEqual(r.status_code, 405)
+
+    def test_bulk_reconcile_markers_action_requires_change_permission(self):
+        self.cfg.mark_sync_queued(
+            "11111111-1111-1111-1111-111111111111",
+            reference=timezone.now() - timedelta(hours=3),
+        )
+        c = Client()
+        c.force_login(self.viewer)
+        url = reverse("plugins:netbox_snmp_sync:devicesnmpconfig_bulk_reconcile_markers")
+
+        r = c.post(url, {"pk": [self.cfg.pk]})
+
+        self.assertEqual(r.status_code, 302)
+        self.cfg.refresh_from_db()
+        self.assertIsNotNone(self.cfg.sync_job_id)
+
+    def test_bulk_reconcile_markers_action_clears_stale_marker(self):
+        self.cfg.mark_sync_queued(
+            "11111111-1111-1111-1111-111111111111",
+            reference=timezone.now() - timedelta(hours=3),
+        )
+        c = Client()
+        c.force_login(self.operator)
+        url = reverse("plugins:netbox_snmp_sync:devicesnmpconfig_bulk_reconcile_markers")
+
+        r = c.post(url, {"pk": [self.cfg.pk]})
 
         self.assertEqual(r.status_code, 302)
         self.cfg.refresh_from_db()

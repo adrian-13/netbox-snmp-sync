@@ -34,6 +34,7 @@ from .spec import DeviceConfig
 PLUGIN_NAME = "netbox_snmp_sync"
 SCHEDULE_SPREAD_MAX_MINUTES = 15
 STALE_SYNC_JOB_MARKER_HOURS = 2
+STALE_SYNC_JOB_MARKER_MESSAGE = "Cleared stale SNMP sync marker after worker restart or lost job."
 ACTIVE_JOB_STATUSES = {"pending", "scheduled", "running"}
 
 
@@ -363,15 +364,16 @@ class DeviceSNMPConfig(NetBoxModel):
 
         from core.models import Job
 
-        cutoff = reference - timedelta(hours=STALE_SYNC_JOB_MARKER_HOURS)
-        marker_is_old = (
+        timeout_minutes = get_stale_sync_job_marker_minutes()
+        cutoff = reference - timedelta(minutes=timeout_minutes)
+        marker_is_old = timeout_minutes > 0 and (
             (self.sync_started_at and self.sync_started_at < cutoff) or
             (self.sync_queued_at and self.sync_queued_at < cutoff)
         )
         job_status = Job.objects.filter(job_id=self.sync_job_id).values_list("status", flat=True).first()
         if job_status in ACTIVE_JOB_STATUSES:
             if marker_is_old:
-                self.clear_sync_job(save=save)
+                self._clear_stale_sync_marker(save=save)
                 return True
             return False
         if job_status is not None:
@@ -379,10 +381,16 @@ class DeviceSNMPConfig(NetBoxModel):
             return True
 
         if marker_is_old:
-            self.clear_sync_job(save=save)
+            self._clear_stale_sync_marker(save=save)
             return True
 
         return False
+
+    def _clear_stale_sync_marker(self, save=True):
+        self.clear_sync_job(save=save)
+        self.last_sync_message = STALE_SYNC_JOB_MARKER_MESSAGE
+        if save and self.pk:
+            type(self).objects.filter(pk=self.pk).update(last_sync_message=self.last_sync_message)
 
     def has_active_sync_job(self, reference=None):
         self.clear_stale_sync_job(reference)
@@ -640,6 +648,12 @@ class SNMPSyncConfig(NetBoxModel):
         default=300,
         help_text="Maximum runtime for the SNMP collection phase of a background sync job. 0 disables this guard.",
     )
+    sync_stale_job_marker_minutes = models.PositiveIntegerField(
+        default=120,
+        help_text="After this many minutes, a queued/running SNMP sync marker is considered stale and may be "
+                  "cleared even if NetBox still shows the old job as active. Use 0 to disable automatic stale "
+                  "marker cleanup for active-looking jobs.",
+    )
     # sync behaviour
     update_existing = models.BooleanField(default=False, help_text="Also overwrite changed fields on existing interfaces.")
     set_mac_address = models.BooleanField(default=True)
@@ -653,8 +667,9 @@ class SNMPSyncConfig(NetBoxModel):
     # skip_loopback_ips and default_ethernet_type live per-device on DeviceSNMPConfig;
     # their ultimate fallback is the plugin's default_settings (via get_setting()).
     _SEED_FIELDS = (
-        "sync_interval_hours", "sync_at_hours", "sync_job_timeout_seconds", "update_existing", "set_mac_address",
-        "write_vlans", "create_vlans", "history_keep_days", "history_keep_count",
+        "sync_interval_hours", "sync_at_hours", "sync_job_timeout_seconds", "sync_stale_job_marker_minutes",
+        "update_existing", "set_mac_address", "write_vlans", "create_vlans",
+        "history_keep_days", "history_keep_count",
     )
 
     class Meta:
@@ -691,6 +706,16 @@ def get_setting(name):
     if hasattr(cfg, name):
         return getattr(cfg, name)
     return get_plugin_config(PLUGIN_NAME, name)
+
+
+def get_stale_sync_job_marker_minutes():
+    value = get_setting("sync_stale_job_marker_minutes")
+    if value is None:
+        return STALE_SYNC_JOB_MARKER_HOURS * 60
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return STALE_SYNC_JOB_MARKER_HOURS * 60
 
 
 def parse_sync_hours(raw):

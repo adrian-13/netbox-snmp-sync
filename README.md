@@ -224,6 +224,8 @@ PLUGINS_CONFIG = {
         # ── History retention (SyncRun pruning) ─────────────────────────────────────
         "sync_job_timeout_seconds": 300,  # max SNMP collection runtime per background job;
                                          # 0 disables this guard
+        "sync_stale_job_marker_minutes": 120,  # clear stale queued/running markers after this
+                                               # many minutes; 0 disables automatic cleanup
 
         "history_keep_days":  90,
         "history_keep_count": 1000,
@@ -318,8 +320,10 @@ explicit per-device schedules keep their own cadence.
 
 On a device SNMP configuration detail page, operators with change permission can also
 **Recalculate** the next sync from the current effective schedule. If a queued/running marker
-is visible, **Reconcile marker** safely clears it only when NetBox no longer has an active or
-recent matching job.
+is visible, **Reconcile marker** safely clears it when it is stale. The list page also provides
+**Reconcile markers** for selected configs, useful after a worker/container restart. Stale
+marker cleanup is automatic in the scheduler too; `sync_stale_job_marker_minutes` controls
+the age threshold and the config's last sync message records when a stale marker was cleared.
 
 ---
 
