@@ -416,7 +416,7 @@ No internal NetBox code is imported directly.
 
 ## Changelog
 
-### Unreleased
+### v0.3.7
 - **Existing object enrichment** - sync now fills missing IP-to-interface assignments and
   missing primary MAC addresses on existing interfaces without reassigning objects that
   already belong elsewhere.
