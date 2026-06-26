@@ -77,12 +77,16 @@
         {% for ip in diff.ips %}
         <tr>
           <td>
-            {% if ip.status == 'new' %}
+            {% if ip.status == 'new' or ip.status == 'changed' %}
               <input class="form-check-input" type="checkbox" name="ip" value="{{ ip.address }}" checked>
             {% endif %}
           </td>
           <td>{{ ip.address }}</td>
-          <td>{% if ip.status == 'new' %}<span class="badge text-bg-green">NEW</span>{% else %}<span class="badge text-bg-blue">exists</span>{% endif %}</td>
+          <td>
+            {% if ip.status == 'new' %}<span class="badge text-bg-green">NEW</span>
+            {% elif ip.status == 'changed' %}<span class="badge text-bg-orange">CHANGED</span>
+            {% else %}<span class="badge text-bg-blue">exists</span>{% endif %}
+          </td>
           <td>{{ ip.iface }}</td>
         </tr>
         {% empty %}

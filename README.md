@@ -416,6 +416,11 @@ No internal NetBox code is imported directly.
 
 ## Changelog
 
+### Unreleased
+- **Existing object enrichment** - sync now fills missing IP-to-interface assignments and
+  missing primary MAC addresses on existing interfaces without reassigning objects that
+  already belong elsewhere.
+
 ### v0.3.6
 - **Worker restart recovery** - stale queued/running SNMP sync markers are cleared after
   a configurable timeout, even when NetBox still shows the old job as active after a

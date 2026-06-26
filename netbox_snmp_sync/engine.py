@@ -78,6 +78,7 @@ class IpDiff:
     address: str
     status: str
     iface: str
+    changes: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -137,6 +138,8 @@ def _iface_changes(iface, rec: Interface, nb_type: str) -> list[dict]:
         changes.append(_ch("enabled", "up" if rec.enabled else "down", "up" if iface.enabled else "down"))
     if iface.description and iface.description != (rec.description or ""):
         changes.append(_ch("description", rec.description or "", iface.description))
+    if iface.mac and not rec.primary_mac_address_id:
+        changes.append(_ch("primary_mac_address", "", iface.mac))
     rec_parent = rec.parent.name if rec.parent else ""
     if iface.parent_name and normalize_port_name(iface.parent_name) != normalize_port_name(rec_parent):
         changes.append(_ch("parent", rec_parent, iface.parent_name))
@@ -179,8 +182,19 @@ def compare_device(device, data: DeviceData, *, ignore_patterns: tuple[str, ...]
     index_to_name = {i.if_index: i.name for i in data.interfaces.values()}
     for ip in data.ip_addresses:
         ifname = index_to_name.get(ip.if_index, f"ifIndex {ip.if_index}")
-        status = EXISTS if IPAddress.objects.filter(address=ip.address).exists() else NEW
-        diff.ips.append(IpDiff(address=ip.address, status=status, iface=ifname))
+        rec = IPAddress.objects.filter(address=ip.address).first()
+        if rec is None:
+            status = NEW
+            changes = []
+        else:
+            iface = by_actual.get(ifname) or by_norm.get(normalize_port_name(ifname))
+            if rec.assigned_object is None and iface is not None:
+                status = CHANGED
+                changes = [_ch("interface", "", iface.name)]
+            else:
+                status = EXISTS
+                changes = []
+        diff.ips.append(IpDiff(address=ip.address, status=status, iface=ifname, changes=changes))
 
     diff.netbox_only_interfaces = sorted(set(by_actual) - matched_actual)
     return diff
@@ -191,11 +205,21 @@ def compare_device(device, data: DeviceData, *, ignore_patterns: tuple[str, ...]
 def _assign_mac(iface: Interface, mac: str):
     """NetBox >= 4.2: create a MACAddress object and set it as the interface's primary MAC."""
     try:
-        mac_obj = MACAddress.objects.create(mac_address=mac, assigned_object=iface)
+        mac_obj = MACAddress.objects.filter(mac_address=mac).first()
+        if mac_obj is None:
+            mac_obj = MACAddress.objects.create(mac_address=mac, assigned_object=iface)
+        elif getattr(mac_obj, "assigned_object", None) is None:
+            mac_obj.assigned_object = iface
+            mac_obj.save()
+        elif mac_obj.assigned_object != iface:
+            log.warning("interface %s: MAC %s is already assigned to %s", iface.name, mac, mac_obj.assigned_object)
+            return False
         iface.primary_mac_address = mac_obj
         iface.save()
+        return True
     except Exception as exc:  # noqa: BLE001
         log.warning("interface %s: could not set MAC %s: %s", iface.name, mac, exc)
+        return False
 
 
 def apply_sync(
@@ -243,6 +267,23 @@ def apply_sync(
 
         rec = by_actual.get(iface.name) or by_norm.get(normalize_port_name(iface.name))
         if rec is not None:
+            if set_mac_address and iface.mac and not rec.primary_mac_address_id:
+                if dry_run:
+                    result.changes.append(SyncChange(
+                        action="updated",
+                        object_type="interface",
+                        object_repr=rec.name,
+                        field="primary_mac_address",
+                        new_value=iface.mac,
+                    ))
+                elif _assign_mac(rec, iface.mac):
+                    result.changes.append(SyncChange(
+                        action="updated",
+                        object_type="interface",
+                        object_repr=rec.name,
+                        field="primary_mac_address",
+                        new_value=iface.mac,
+                    ))
             if update_existing:
                 update_targets.append((iface, rec))
             else:
@@ -552,12 +593,30 @@ def _sync_ips(data: DeviceData, valid_iface_names: set[str], name_to_iface: dict
         if iface_name not in valid_iface_names:
             result.warnings.append(f"IP {ip.address} skipped — interface {iface_name!r} ignored/not synced")
             continue
-        if IPAddress.objects.filter(address=ip.address).exists():
+        iface = name_to_iface.get(iface_name) or name_to_iface.get(normalize_port_name(iface_name))
+        existing = IPAddress.objects.filter(address=ip.address).first()
+        if existing is not None:
+            if existing.assigned_object is None and iface is not None:
+                result.changes.append(SyncChange(
+                    action="updated",
+                    object_type="ipaddress",
+                    object_repr=ip.address,
+                    field="interface",
+                    new_value=iface.name,
+                ))
+                if not dry_run:
+                    existing.assigned_object = iface
+                    existing.save()
+            elif iface is not None and existing.assigned_object == iface:
+                pass
+            elif iface is not None:
+                result.warnings.append(
+                    f"IP {ip.address} already assigned to {existing.assigned_object} — not reassigned to {iface.name}"
+                )
             result.ips_existing += 1
             continue
         log.info("%screate IP %s on %s", prefix, ip.address, iface_name)
         if not dry_run:
-            iface = name_to_iface.get(iface_name) or name_to_iface.get(normalize_port_name(iface_name))
             ip_obj = IPAddress.objects.create(address=ip.address, status="active", assigned_object=iface)
             result.created_objects.append(ip_obj)
             result.changes.append(SyncChange(

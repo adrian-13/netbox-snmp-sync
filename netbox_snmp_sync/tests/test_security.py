@@ -16,7 +16,7 @@ from rest_framework.test import APIClient
 from users.models import ObjectPermission
 
 from netbox_snmp_sync.tables import SNMP_TEST_BUTTON
-from netbox_snmp_sync.dto import DeviceData, InterfaceData, VlanData, serialize_device_data
+from netbox_snmp_sync.dto import DeviceData, InterfaceData, IPAddressData, VlanData, serialize_device_data
 from netbox_snmp_sync.models import DeviceSNMPConfig, SNMPSyncConfig, SyncRun
 
 User = get_user_model()
@@ -195,6 +195,42 @@ class SecurityTestCase(TestCase):
         self.assertTrue(apply_sync.call_args.kwargs["create_vlans"])
         run = self.cfg.device.snmp_sync_runs.latest("created")
         self.assertIn("VLANs set 1, created 1", run.message)
+
+    def test_preview_write_keeps_interface_for_selected_ip(self):
+        data = DeviceData(target="10.0.0.1", sys_name="sw1")
+        data.interfaces[1] = InterfaceData(
+            if_index=1, name="ether1", if_type=6, nb_type="1000base-t",
+        )
+        data.ip_addresses.append(IPAddressData(address="10.0.0.1/30", if_index=1))
+        result = SimpleNamespace(
+            interfaces_created=0,
+            interfaces_updated=0,
+            interfaces_existing=1,
+            interfaces_ignored=0,
+            ips_created=0,
+            ips_existing=1,
+            iface_vlans_set=0,
+            vlans_created=0,
+            devices_updated=0,
+            warnings=[],
+            created_objects=[],
+            changes=[],
+        )
+        c = Client()
+        c.force_login(self.admin)
+        url = reverse("plugins:netbox_snmp_sync:devicesnmpconfig_preview", args=[self.cfg.pk])
+
+        with patch("netbox_snmp_sync.views.engine.apply_sync", return_value=result) as apply_sync:
+            r = c.post(url, {
+                "snapshot": json.dumps(serialize_device_data(data)),
+                "ip": ["10.0.0.1/30"],
+            })
+
+        self.assertEqual(r.status_code, 302)
+        apply_sync.assert_called_once()
+        synced_data = apply_sync.call_args.args[1]
+        self.assertEqual([iface.name for iface in synced_data.interfaces.values()], ["ether1"])
+        self.assertEqual([ip.address for ip in synced_data.ip_addresses], ["10.0.0.1/30"])
 
     def test_preview_write_creates_and_assigns_vlans(self):
         from dcim.models import Interface

@@ -53,6 +53,25 @@ class EngineTestCase(TestCase):
         self.assertEqual(diff.new_interfaces, 3)
         self.assertEqual(diff.new_ips, 1)
 
+    def test_compare_marks_unassigned_existing_ip_changed(self):
+        Interface.objects.create(device=self.device, name="ether1", type="1000base-t", enabled=True)
+        IPAddress.objects.create(address="10.0.0.1/30", status="active")
+
+        diff = engine.compare_device(self.device, _device_data())
+
+        row = next(ip for ip in diff.ips if ip.address == "10.0.0.1/30")
+        self.assertEqual(row.status, engine.CHANGED)
+        self.assertEqual(row.iface, "ether1")
+
+    def test_compare_marks_existing_interface_without_mac_changed(self):
+        Interface.objects.create(device=self.device, name="ether1", type="1000base-t", enabled=True)
+
+        diff = engine.compare_device(self.device, _device_data())
+
+        row = next(iface for iface in diff.interfaces if iface.name == "ether1")
+        self.assertEqual(row.status, engine.CHANGED)
+        self.assertTrue(any(change["field"] == "primary_mac_address" for change in row.changes))
+
     def test_apply_creates_objects(self):
         result = engine.apply_sync(self.device, _device_data(), dry_run=False)
         self.assertEqual(result.interfaces_created, 3)
@@ -71,6 +90,38 @@ class EngineTestCase(TestCase):
         eth1 = Interface.objects.get(device=self.device, name="ether1")
         self.assertIsNotNone(eth1.primary_mac_address)
         self.assertEqual(str(eth1.primary_mac_address.mac_address), "AA:BB:CC:DD:EE:01")
+
+    def test_apply_sets_mac_on_existing_interface(self):
+        Interface.objects.create(device=self.device, name="ether1", type="1000base-t", enabled=True)
+
+        result = engine.apply_sync(self.device, _device_data(), dry_run=False)
+
+        eth1 = Interface.objects.get(device=self.device, name="ether1")
+        self.assertIsNotNone(eth1.primary_mac_address)
+        self.assertEqual(str(eth1.primary_mac_address.mac_address), "AA:BB:CC:DD:EE:01")
+        self.assertTrue(any(
+            change.object_type == "interface"
+            and change.object_repr == "ether1"
+            and change.field == "primary_mac_address"
+            for change in result.changes
+        ))
+
+    def test_apply_assigns_existing_unassigned_ip_to_interface(self):
+        iface = Interface.objects.create(device=self.device, name="ether1", type="1000base-t", enabled=True)
+        ip = IPAddress.objects.create(address="10.0.0.1/30", status="active")
+
+        result = engine.apply_sync(self.device, _device_data(), dry_run=False)
+
+        ip.refresh_from_db()
+        self.assertEqual(ip.assigned_object, iface)
+        self.assertEqual(result.ips_existing, 1)
+        self.assertTrue(any(
+            change.object_type == "ipaddress"
+            and change.object_repr == "10.0.0.1/30"
+            and change.field == "interface"
+            and change.new_value == "ether1"
+            for change in result.changes
+        ))
 
     def test_apply_is_idempotent(self):
         engine.apply_sync(self.device, _device_data(), dry_run=False)

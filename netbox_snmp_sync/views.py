@@ -386,7 +386,15 @@ class DeviceSNMPConfigPreviewView(LoginRequiredMixin, View):
         write_vlans = bool(get_setting("write_vlans"))
         create_vlans = bool(get_setting("create_vlans"))
         selected_vlan_ifaces = set(request.POST.getlist("vlan_iface")) if write_vlans else set()
-        selected_interface_names = selected_ifaces | selected_vlan_ifaces
+        selected_ip_ifindexes = {
+            ip.if_index for ip in data.ip_addresses
+            if ip.address in selected_ips
+        }
+        selected_ip_ifaces = {
+            iface.name for if_index, iface in data.interfaces.items()
+            if if_index in selected_ip_ifindexes
+        }
+        selected_interface_names = selected_ifaces | selected_vlan_ifaces | selected_ip_ifaces
         data.interfaces = {i: f for i, f in data.interfaces.items() if f.name in selected_interface_names}
         data.ip_addresses = [ip for ip in data.ip_addresses if ip.address in selected_ips]
         rename_device_pending = _rename_device_to_sysname_pending(config, data)
