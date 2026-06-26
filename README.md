@@ -416,7 +416,7 @@ No internal NetBox code is imported directly.
 
 ## Changelog
 
-### Unreleased
+### v0.3.6
 - **Worker restart recovery** - stale queued/running SNMP sync markers are cleared after
   a configurable timeout, even when NetBox still shows the old job as active after a
   worker/container restart.
