@@ -323,6 +323,34 @@ async def quick_snmp_ping(dev: DeviceConfig, timeout: float = 1.5) -> tuple[bool
     return True, None
 
 
+async def quick_snmp_sys_name(dev: DeviceConfig, timeout: float = 1.5) -> tuple[str | None, str | None]:
+    """Fast test probe: one sysName GET with a tight timeout and no table walks.
+
+    Returns (sys_name_or_None, error_message_or_None) and never raises.
+    """
+    from dataclasses import replace as _replace
+    try:
+        probe = _replace(dev, timeout=timeout, retries=0)
+        auth = _build_auth(probe)
+    except Exception as exc:  # noqa: BLE001
+        return None, f"configuration: {exc}"
+    try:
+        engine = h.SnmpEngine()
+        target = await h.UdpTransportTarget.create(
+            (probe.target, probe.snmp_port),
+            timeout=probe.timeout,
+            retries=probe.retries,
+        )
+        val = await _get(engine, auth, target, OID_SYS_NAME)
+    except SnmpError as exc:
+        return None, str(exc)
+    except Exception as exc:  # noqa: BLE001
+        return None, str(exc)
+    if val is None:
+        return None, "no response"
+    return _to_str(val), None
+
+
 async def collect(dev: DeviceConfig) -> DeviceData:
     """Poll one device over SNMP and return a normalized DeviceData."""
     auth = _build_auth(dev)

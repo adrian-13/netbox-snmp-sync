@@ -19,7 +19,7 @@ from .choices import SyncModeChoices, SyncStatusChoices, SyncTriggerChoices
 from .dto import deserialize_device_data, serialize_device_data
 from .jobs import SNMPSyncJob
 from .models import DeviceSNMPConfig, SNMPSyncConfig, SyncRun, get_setting, record_created_objects, record_sync_changes
-from .snmp_collector import collect_with_ping
+from .snmp_collector import collect_with_ping, quick_snmp_sys_name
 
 
 def _collect_blocking(spec):
@@ -30,6 +30,12 @@ def _collect_blocking(spec):
     """
     with ThreadPoolExecutor(max_workers=1) as ex:
         return ex.submit(lambda: asyncio.run(collect_with_ping(spec))).result()
+
+
+def _quick_sys_name_blocking(spec):
+    """Run the fast SNMP sysName probe synchronously in a fresh thread."""
+    with ThreadPoolExecutor(max_workers=1) as ex:
+        return ex.submit(lambda: asyncio.run(quick_snmp_sys_name(spec))).result()
 
 
 def _vlan_preview_rows(data):
@@ -66,16 +72,11 @@ def _evaluate(spec):
     if not spec.target:
         return False, "No SNMP target (set a primary IP or target override)."
     t0 = time.monotonic()
-    try:
-        data = _collect_blocking(spec)
-    except Exception as exc:  # noqa: BLE001
-        return False, f"{spec.target}: {exc}"
+    sys_name, err = _quick_sys_name_blocking(spec)
     elapsed = time.monotonic() - t0
-    return True, (
-        f"sysName={data.sys_name or '—'}, vendor={data.vendor or '—'}, "
-        f"{len(data.interfaces)} interfaces, {len(data.ip_addresses)} IPs, "
-        f"{len(data.vlans)} VLANs ({elapsed:.1f}s)"
-    )
+    if err:
+        return False, f"{spec.target}: {err}"
+    return True, f"sysName={sys_name or '-'} ({elapsed:.1f}s)"
 
 
 def _persist_test(config, ok, message):
@@ -186,9 +187,11 @@ class DeviceSNMPConfigSyncView(LoginRequiredMixin, View):
 
 @register_model_view(DeviceSNMPConfig, name="test", path="test")
 class DeviceSNMPConfigTestView(LoginRequiredMixin, View):
-    """Quick read-only SNMP connectivity test for one device: poll it and render a result page
-    (OK/Failed + sysName, vendor, counts). Also persists the outcome on the config so the list
-    column / device panel show it. Writes nothing else to NetBox."""
+    """Quick read-only SNMP connectivity test for one device: one sysName GET.
+
+    Also persists the outcome on the config so the list column / device panel show it.
+    Writes nothing else to NetBox.
+    """
 
     def post(self, request, pk):
         config = get_object_or_404(DeviceSNMPConfig, pk=pk)

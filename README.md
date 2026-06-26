@@ -87,7 +87,7 @@ Each device gets its own SNMP configuration, accessible from the device detail p
 
 | Action | What it does |
 |--------|-------------|
-| **Test SNMP** | Quick connectivity probe (ICMP ping + SNMP poll). Renders a full result page showing OK / Failed, sysName, vendor, interface / IP / VLAN counts. Saves the outcome to the *Last test* column — no NetBox data is changed. |
+| **Test SNMP** | Quick connectivity probe (one SNMP GET for sysName). Renders a full result page showing OK / Failed and sysName. Saves the outcome to the *Last test* column — no NetBox data is changed. |
 | **Bulk test** | Select multiple configs in the list → **Test selected** → probes all of them concurrently (worker pool of 8) and renders a combined result page. |
 | **Preview & write** | Full SNMP poll → diff page with checkboxes → writes only the items you select. |
 | **Compare** | SNMP poll → diff written to the background job log (read-only, nothing is changed). |
@@ -250,7 +250,7 @@ IP; set **Target override** if you need to poll a management address instead.
 Click the **Test SNMP** button (the cyan icon next to the pencil in the list, or the button
 in the device panel). A result page is rendered immediately:
 
-- ✅ **OK** — shows sysName, vendor, and counts of discovered interfaces / IPs / VLANs
+- ✅ **OK** — shows the sysName returned by the device
 - ❌ **Failed** — shows the exact error (unreachable, wrong community, timeout, …)
 
 The result is saved to the **Last test** column in the list and to the device panel, so you

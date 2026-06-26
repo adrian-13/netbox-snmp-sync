@@ -3,17 +3,23 @@ from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from core.models import Job
 from dcim.models import Device, DeviceRole, DeviceType, Interface, Manufacturer, Site
 from ipam.models import VLAN, IPAddress
 
-from netbox_snmp_sync import engine
+from netbox_snmp_sync import engine, views
 from netbox_snmp_sync.dto import DeviceData, InterfaceData, IPAddressData, VlanData
 from netbox_snmp_sync.forms import DeviceSNMPConfigForm, SNMPSyncConfigForm
-from netbox_snmp_sync.jobs import SYSTEM_USERNAME, ScheduledSNMPSyncJob, _collect_with_job_timeout, _fake_request
+from netbox_snmp_sync.jobs import (
+    SYSTEM_USERNAME,
+    PruneSyncRunsJob,
+    ScheduledSNMPSyncJob,
+    _collect_with_job_timeout,
+    _fake_request,
+)
 from netbox_snmp_sync.models import DeviceSNMPConfig, SNMPSyncConfig, SyncRun
 
 
@@ -644,3 +650,78 @@ class DeviceSNMPConfigTestCase(TestCase):
         self.assertTrue(cfg.has_active_sync_job())
         cfg.refresh_from_db()
         self.assertEqual(str(cfg.sync_job_id), job_id)
+
+    def test_snmp_test_uses_sysname_probe_only(self):
+        cfg = DeviceSNMPConfig.objects.create(
+            device=self.device,
+            snmp_version="2c",
+            community="public",
+            target_override="10.0.0.1",
+        )
+
+        with patch("netbox_snmp_sync.views._quick_sys_name_blocking", return_value=("sw1-snmp", None)) as quick:
+            with patch("netbox_snmp_sync.views._collect_blocking") as collect:
+                ok, message = views._evaluate(cfg.to_spec())
+
+        self.assertTrue(ok)
+        self.assertIn("sysName=sw1-snmp", message)
+        quick.assert_called_once()
+        collect.assert_not_called()
+
+    def _create_sync_run(self, *, created, message):
+        run = SyncRun.objects.create(
+            device=self.device,
+            trigger="manual",
+            mode="apply",
+            status="ok",
+            message=message,
+        )
+        SyncRun.objects.filter(pk=run.pk).update(created=created)
+        run.refresh_from_db()
+        return run
+
+    def _run_prune_job(self):
+        runner = PruneSyncRunsJob(SimpleNamespace(user=None))
+        runner.logger = SimpleNamespace(info=lambda _msg: None)
+        runner.run()
+
+    @override_settings(CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}})
+    def test_prune_sync_runs_respects_keep_count(self):
+        SNMPSyncConfig.objects.create(history_keep_days=0, history_keep_count=3)
+        now = timezone.now()
+        for index in range(5):
+            self._create_sync_run(created=now - timedelta(minutes=index), message=f"run-{index}")
+
+        self._run_prune_job()
+
+        remaining = set(SyncRun.objects.values_list("message", flat=True))
+        self.assertEqual(SyncRun.objects.count(), 3)
+        self.assertEqual(remaining, {"run-0", "run-1", "run-2"})
+
+    @override_settings(CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}})
+    def test_prune_sync_runs_respects_keep_days(self):
+        SNMPSyncConfig.objects.create(history_keep_days=10, history_keep_count=0)
+        now = timezone.now()
+        self._create_sync_run(created=now - timedelta(days=1), message="recent")
+        self._create_sync_run(created=now - timedelta(days=11), message="old")
+        self._create_sync_run(created=now - timedelta(days=30), message="older")
+
+        self._run_prune_job()
+
+        remaining = set(SyncRun.objects.values_list("message", flat=True))
+        self.assertEqual(remaining, {"recent"})
+
+    @override_settings(CACHES={"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"}})
+    def test_prune_sync_runs_applies_days_before_count(self):
+        SNMPSyncConfig.objects.create(history_keep_days=10, history_keep_count=2)
+        now = timezone.now()
+        self._create_sync_run(created=now - timedelta(days=1), message="newest")
+        self._create_sync_run(created=now - timedelta(days=2), message="second")
+        self._create_sync_run(created=now - timedelta(days=3), message="third")
+        self._create_sync_run(created=now - timedelta(days=12), message="old")
+
+        self._run_prune_job()
+
+        remaining = set(SyncRun.objects.values_list("message", flat=True))
+        self.assertEqual(SyncRun.objects.count(), 2)
+        self.assertEqual(remaining, {"newest", "second"})
