@@ -92,7 +92,7 @@ Each device gets its own SNMP configuration, accessible from the device detail p
 | **Preview & write** | Full SNMP poll → diff page with checkboxes → writes only the items you select. |
 | **Compare** | SNMP poll → diff written to the background job log (read-only, nothing is changed). |
 | **Sync all** | SNMP poll → add-only write of all new interfaces and IPs to NetBox. |
-| **Scheduled sync** | System job that runs hourly and queues a per-device sync for every enabled device that has not been synced within the configured interval. |
+| **Scheduled sync** | System job that runs every few minutes and queues a per-device sync for each enabled device whose next sync time is due. |
 
 Per-device SNMP settings also include **Rename device to sysName**. When enabled, apply
 syncs rename the NetBox device to the collected SNMP `sysName`; read-only tests and
@@ -415,6 +415,18 @@ No internal NetBox code is imported directly.
 ---
 
 ## Changelog
+
+### Unreleased
+- **Worker restart recovery** - stale queued/running SNMP sync markers are cleared after
+  a configurable timeout, even when NetBox still shows the old job as active after a
+  worker/container restart.
+- **Stale marker controls** - added `sync_stale_job_marker_minutes`, visible last-sync
+  messages when stale markers are cleared, and a bulk **Reconcile markers** action for
+  selected device SNMP configurations.
+- **Faster SNMP tests** - **Test SNMP** now uses a single `sysName` GET instead of a full
+  collection walk, so connectivity checks return quickly on large or slow devices.
+- **History pruning coverage** - added tests for `history_keep_days` and
+  `history_keep_count` retention behaviour.
 
 ### v0.3.5
 - **Cisco VLAN discovery** - collect VLAN names from CISCO-VTP-MIB and port
