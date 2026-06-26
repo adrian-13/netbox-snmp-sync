@@ -33,6 +33,7 @@ from .spec import DeviceConfig
 
 PLUGIN_NAME = "netbox_snmp_sync"
 SCHEDULE_SPREAD_MAX_MINUTES = 15
+STALE_SYNC_JOB_MARKER_HOURS = 2
 ACTIVE_JOB_STATUSES = {"pending", "scheduled", "running"}
 
 
@@ -351,25 +352,33 @@ class DeviceSNMPConfig(NetBoxModel):
             )
 
     def clear_stale_sync_job(self, reference=None, save=True):
-        """Clear a stuck queued/running marker once NetBox no longer has an active job for it."""
+        """Clear a stuck queued/running marker once it is safe to enqueue a replacement.
+
+        NetBox can retain an active-looking Job row after the worker/container dies, so an
+        old local marker wins over the Job status. Fresh active jobs are still preserved.
+        """
         reference = reference or timezone.now()
         if not self.sync_job_id:
             return False
 
         from core.models import Job
 
+        cutoff = reference - timedelta(hours=STALE_SYNC_JOB_MARKER_HOURS)
+        marker_is_old = (
+            (self.sync_started_at and self.sync_started_at < cutoff) or
+            (self.sync_queued_at and self.sync_queued_at < cutoff)
+        )
         job_status = Job.objects.filter(job_id=self.sync_job_id).values_list("status", flat=True).first()
         if job_status in ACTIVE_JOB_STATUSES:
+            if marker_is_old:
+                self.clear_sync_job(save=save)
+                return True
             return False
         if job_status is not None:
             self.clear_sync_job(save=save)
             return True
 
-        cutoff = reference - timedelta(hours=2)
-        if (
-            (self.sync_started_at and self.sync_started_at < cutoff) or
-            (self.sync_queued_at and self.sync_queued_at < cutoff)
-        ):
+        if marker_is_old:
             self.clear_sync_job(save=save)
             return True
 

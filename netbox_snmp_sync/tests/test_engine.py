@@ -589,16 +589,27 @@ class DeviceSNMPConfigTestCase(TestCase):
         cfg.refresh_from_db()
         self.assertIsNone(cfg.sync_job_id)
 
-    def test_old_sync_job_marker_is_kept_when_netbox_job_is_active(self):
+    def test_recent_sync_job_marker_is_kept_when_netbox_job_is_active(self):
         cfg = DeviceSNMPConfig.objects.create(device=self.device, snmp_version="2c", community="public")
         job_id = "11111111-1111-1111-1111-111111111111"
         Job.objects.create(name="SNMP Sync", job_id=job_id, status="running")
-        cfg.mark_sync_started(job_id, reference=timezone.now() - timedelta(hours=3))
+        cfg.mark_sync_started(job_id, reference=timezone.now() - timedelta(minutes=10))
 
         self.assertTrue(cfg.has_active_sync_job())
         cfg.refresh_from_db()
         self.assertEqual(str(cfg.sync_job_id), job_id)
         self.assertEqual(cfg.sync_state, "running")
+
+    def test_old_active_sync_job_marker_is_cleared_after_worker_restart(self):
+        cfg = DeviceSNMPConfig.objects.create(device=self.device, snmp_version="2c", community="public")
+        job_id = "11111111-1111-1111-1111-111111111111"
+        Job.objects.create(name="SNMP Sync", job_id=job_id, status="running")
+        cfg.mark_sync_started(job_id, reference=timezone.now() - timedelta(hours=3))
+
+        self.assertFalse(cfg.has_active_sync_job())
+        cfg.refresh_from_db()
+        self.assertIsNone(cfg.sync_job_id)
+        self.assertEqual(cfg.sync_state, "disabled")
 
     def test_sync_job_marker_is_cleared_when_netbox_job_is_finished(self):
         cfg = DeviceSNMPConfig.objects.create(device=self.device, snmp_version="2c", community="public")
