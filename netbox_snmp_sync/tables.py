@@ -27,6 +27,8 @@ NEXT_SYNC_COL = """{% if not record.enabled %}<span class="text-muted">disabled<
 
 SCHEDULE_COL = """<span class="badge text-bg-{{ record.schedule_color }}">{{ record.schedule_label }}</span>"""
 
+BEHAVIOUR_COL = """<span title="Interfaces">{{ record.sync_interfaces_label }}</span> / <span title="IP addresses">{{ record.sync_ip_addresses_label }}</span> / <span title="VLAN writes">{{ record.write_vlans_label }}</span>"""
+
 
 class DeviceSNMPConfigTable(NetBoxTable):
     device = tables.Column(linkify=True)
@@ -34,6 +36,7 @@ class DeviceSNMPConfigTable(NetBoxTable):
     snmp_version = columns.ChoiceFieldColumn()
     last_sync = tables.TemplateColumn(template_code=LAST_SYNC_COL, verbose_name="Last sync", orderable=False)
     schedule = tables.TemplateColumn(template_code=SCHEDULE_COL, verbose_name="Schedule", orderable=False)
+    behaviour = tables.TemplateColumn(template_code=BEHAVIOUR_COL, verbose_name="Sync", orderable=False)
     sync_state = tables.TemplateColumn(template_code=SYNC_STATE_COL, verbose_name="Sync state", orderable=False)
     next_sync = tables.TemplateColumn(template_code=NEXT_SYNC_COL, verbose_name="Next sync", orderable=False)
     actions = columns.ActionsColumn(extra_buttons=SNMP_TEST_BUTTON)
@@ -51,6 +54,7 @@ class DeviceSNMPConfigTable(NetBoxTable):
             "timeout",
             "retries",
             "schedule",
+            "behaviour",
             "last_sync",
             "sync_state",
             "next_sync",
@@ -59,7 +63,7 @@ class DeviceSNMPConfigTable(NetBoxTable):
         )
         default_columns = (
             "device", "enabled", "snmp_version", "port", "community",
-            "schedule", "last_sync", "sync_state", "next_sync",
+            "behaviour", "schedule", "last_sync", "sync_state", "next_sync",
         )
 
 

@@ -94,10 +94,14 @@ Each device gets its own SNMP configuration, accessible from the device detail p
 | **Sync all** | SNMP poll → add-only write of all new interfaces and IPs to NetBox. |
 | **Scheduled sync** | System job that runs every few minutes and queues a per-device sync for each enabled device whose next sync time is due. |
 
-Per-device SNMP settings also include **Rename device to sysName**. When enabled, apply
-syncs rename the NetBox device to the collected SNMP `sysName`; read-only tests and
-compare runs do not rename devices. Preview shows the collected `sysName` before writing,
-and successful renames are recorded in the sync run message and change log.
+Per-device SNMP settings also include **Rename device to sysName** and sync behaviour
+overrides. Each device can inherit the global settings or explicitly enable/disable
+interface sync, IP address sync, updating existing interfaces, MAC writes, VLAN membership
+writes, automatic VLAN creation, and whether VLAN IDs may be inferred from sub-interface
+names like `parent.30`. When rename is enabled, apply syncs rename the NetBox device to
+the collected SNMP `sysName`; read-only tests and compare runs do not rename devices.
+Preview shows the collected `sysName` before writing, and successful renames are recorded
+in the sync run message and change log.
 
 ### History and audit
 
@@ -117,7 +121,7 @@ and successful renames are recorded in the sync run message and change log.
 Plugin-level settings are stored in a database-backed singleton (`SNMPSyncConfig`) and
 editable at **SNMP Sync → Settings** without restarting NetBox:
 
-- Sync interval (hours), update existing objects, set MAC address
+- Sync interval (hours), sync interfaces/IPs, update existing objects, set MAC address
 - VLAN write / auto-create, history retention (days + count)
 
 ### Bulk device setup
@@ -215,6 +219,8 @@ PLUGINS_CONFIG = {
         # ── VLAN sync ───────────────────────────────────────────────────────────────
         "write_vlans":  False,  # assign VLAN membership on interfaces
         "create_vlans": False,  # auto-create missing VLANs in the device's site
+        "vlan_subinterface_inference": "auto",  # auto | enabled | disabled;
+                                                # auto infers parent.<vid> only for MikroTik
 
         # ── Scheduler ───────────────────────────────────────────────────────────────
         "sync_interval_hours": 24,  # 0 = interval scheduler disabled
@@ -415,6 +421,16 @@ No internal NetBox code is imported directly.
 ---
 
 ## Changelog
+
+### v0.3.8
+- **Per-device sync behaviour** - device SNMP configs can now inherit or override
+  interface sync, IP sync, existing-interface updates, MAC writes, VLAN writes, and
+  automatic VLAN creation.
+- **VLAN sub-interface inference strategy** - added global and per-device controls for
+  whether names like `parent.30` should be treated as VLAN 30. `Auto` enables this for
+  MikroTik and avoids false Cisco VLANs from sub-interface unit suffixes.
+- **Cisco VLAN safety** - Cisco subinterfaces such as `Gi0/0/0.10` no longer create or
+  assign VLAN 10 unless SNMP data or an explicit inference override says so.
 
 ### v0.3.7
 - **Existing object enrichment** - sync now fills missing IP-to-interface assignments and

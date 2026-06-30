@@ -156,47 +156,57 @@ def _existing_interfaces(device):
 
 # ─────────────────────────────── compare (read-only) ───────────────────────────────
 
-def compare_device(device, data: DeviceData, *, ignore_patterns: tuple[str, ...] = ()) -> DeviceDiff:
+def compare_device(
+    device,
+    data: DeviceData,
+    *,
+    sync_interfaces: bool = True,
+    sync_ip_addresses: bool = True,
+    ignore_patterns: tuple[str, ...] = (),
+) -> DeviceDiff:
     """Read-only diff of SNMP-collected ``data`` against the NetBox ``device``'s state."""
     diff = DeviceDiff()
     ignore_res = [re.compile(p) for p in ignore_patterns]
     by_norm, by_actual = _existing_interfaces(device)
 
     matched_actual: set[str] = set()
-    for iface in data.interfaces.values():
-        speed = f"{iface.speed_kbps // 1000} Mb" if iface.speed_kbps else "-"
-        row = IfaceDiff(
-            name=iface.name, status=NEW, type=iface.nb_type, speed=speed,
-            duplex=iface.duplex or "-", description=iface.description,
-            parent=iface.parent_name or "",
-        )
-        rec = by_actual.get(iface.name) or by_norm.get(normalize_port_name(iface.name))
-        if any(rx.search(iface.name) for rx in ignore_res):
-            row.status = IGNORED
-        elif rec is not None:
-            row.changes = _iface_changes(iface, rec, iface.nb_type)
-            row.status = CHANGED if row.changes else EXISTS
-            matched_actual.add(rec.name)
-        diff.interfaces.append(row)
+    if sync_interfaces:
+        for iface in data.interfaces.values():
+            speed = f"{iface.speed_kbps // 1000} Mb" if iface.speed_kbps else "-"
+            row = IfaceDiff(
+                name=iface.name, status=NEW, type=iface.nb_type, speed=speed,
+                duplex=iface.duplex or "-", description=iface.description,
+                parent=iface.parent_name or "",
+            )
+            rec = by_actual.get(iface.name) or by_norm.get(normalize_port_name(iface.name))
+            if any(rx.search(iface.name) for rx in ignore_res):
+                row.status = IGNORED
+            elif rec is not None:
+                row.changes = _iface_changes(iface, rec, iface.nb_type)
+                row.status = CHANGED if row.changes else EXISTS
+                matched_actual.add(rec.name)
+            diff.interfaces.append(row)
 
     index_to_name = {i.if_index: i.name for i in data.interfaces.values()}
-    for ip in data.ip_addresses:
-        ifname = index_to_name.get(ip.if_index, f"ifIndex {ip.if_index}")
-        rec = IPAddress.objects.filter(address=ip.address).first()
-        if rec is None:
-            status = NEW
-            changes = []
-        else:
-            iface = by_actual.get(ifname) or by_norm.get(normalize_port_name(ifname))
-            if rec.assigned_object is None and iface is not None:
-                status = CHANGED
-                changes = [_ch("interface", "", iface.name)]
-            else:
-                status = EXISTS
+    if sync_ip_addresses:
+        for ip in data.ip_addresses:
+            ifname = index_to_name.get(ip.if_index, f"ifIndex {ip.if_index}")
+            rec = IPAddress.objects.filter(address=ip.address).first()
+            if rec is None:
+                status = NEW
                 changes = []
-        diff.ips.append(IpDiff(address=ip.address, status=status, iface=ifname, changes=changes))
+            else:
+                iface = by_actual.get(ifname) or by_norm.get(normalize_port_name(ifname))
+                if rec.assigned_object is None and iface is not None:
+                    status = CHANGED
+                    changes = [_ch("interface", "", iface.name)]
+                else:
+                    status = EXISTS
+                    changes = []
+            diff.ips.append(IpDiff(address=ip.address, status=status, iface=ifname, changes=changes))
 
-    diff.netbox_only_interfaces = sorted(set(by_actual) - matched_actual)
+    if sync_interfaces:
+        diff.netbox_only_interfaces = sorted(set(by_actual) - matched_actual)
     return diff
 
 
@@ -229,6 +239,8 @@ def apply_sync(
     dry_run: bool = False,
     update_existing: bool = False,
     set_mac_address: bool = True,
+    sync_interfaces: bool = True,
+    sync_ip_addresses: bool = True,
     write_vlans: bool = False,
     create_vlans: bool = False,
     rename_device_to_sysname: bool = False,
@@ -261,11 +273,19 @@ def apply_sync(
     update_targets: list[tuple] = []
 
     for iface in data.interfaces.values():
+        rec = by_actual.get(iface.name) or by_norm.get(normalize_port_name(iface.name))
+        if not sync_interfaces:
+            if rec is not None:
+                valid_iface_names.add(rec.name)
+                valid_iface_names.add(iface.name)
+                name_to_iface.setdefault(iface.name, rec)
+                name_to_iface.setdefault(normalize_port_name(iface.name), rec)
+            continue
+
         if any(rx.search(iface.name) for rx in ignore_res):
             result.interfaces_ignored += 1
             continue
 
-        rec = by_actual.get(iface.name) or by_norm.get(normalize_port_name(iface.name))
         if rec is not None:
             if set_mac_address and iface.mac and not rec.primary_mac_address_id:
                 if dry_run:
@@ -327,7 +347,8 @@ def apply_sync(
 
     _set_parents(data, created, name_to_iface, result, dry_run)
     _update_existing(update_targets, name_to_iface, result, dry_run, prefix)
-    _sync_ips(data, valid_iface_names, name_to_iface, result, dry_run, prefix)
+    if sync_ip_addresses:
+        _sync_ips(data, valid_iface_names, name_to_iface, result, dry_run, prefix)
     if write_vlans:
         _sync_iface_vlans(device, data, name_to_iface, result, dry_run=dry_run, create_vlans=create_vlans, prefix=prefix)
     return result

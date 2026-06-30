@@ -48,6 +48,7 @@ class DeviceData:
     sys_name: str | None = None
     sys_descr: str | None = None
     vendor: str | None = None    # derived from sysObjectID enterprise number
+    vlan_subinterface_inference: str = "auto"  # auto | enabled | disabled
     model: str | None = None     # ENTITY-MIB chassis model name (best-effort)
     serial: str | None = None    # ENTITY-MIB chassis serial number (best-effort)
     interfaces: dict[int, InterfaceData] = field(default_factory=dict)
@@ -71,6 +72,7 @@ def deserialize_device_data(d: dict) -> "DeviceData":
         sys_name=d.get("sys_name"),
         sys_descr=d.get("sys_descr"),
         vendor=d.get("vendor"),
+        vlan_subinterface_inference=d.get("vlan_subinterface_inference") or "auto",
         model=d.get("model"),
         serial=d.get("serial"),
     )

@@ -79,6 +79,50 @@ class EngineTestCase(TestCase):
         self.assertEqual(Interface.objects.filter(device=self.device).count(), 3)
         self.assertTrue(IPAddress.objects.filter(address="10.0.0.1/30").exists())
 
+    def test_compare_can_disable_interfaces_and_ips(self):
+        Interface.objects.create(device=self.device, name="netbox-only", type="1000base-t", enabled=True)
+
+        diff = engine.compare_device(
+            self.device,
+            _device_data(),
+            sync_interfaces=False,
+            sync_ip_addresses=False,
+        )
+
+        self.assertEqual(diff.interfaces, [])
+        self.assertEqual(diff.ips, [])
+        self.assertEqual(diff.netbox_only_interfaces, [])
+
+    def test_apply_can_disable_interfaces_and_ips(self):
+        result = engine.apply_sync(
+            self.device,
+            _device_data(),
+            dry_run=False,
+            sync_interfaces=False,
+            sync_ip_addresses=False,
+        )
+
+        self.assertEqual(result.interfaces_created, 0)
+        self.assertEqual(result.ips_created, 0)
+        self.assertEqual(Interface.objects.filter(device=self.device).count(), 0)
+        self.assertFalse(IPAddress.objects.filter(address="10.0.0.1/30").exists())
+
+    def test_apply_syncs_ip_to_existing_interface_when_interface_sync_disabled(self):
+        iface = Interface.objects.create(device=self.device, name="ether1", type="1000base-t", enabled=True)
+
+        result = engine.apply_sync(
+            self.device,
+            _device_data(),
+            dry_run=False,
+            sync_interfaces=False,
+            sync_ip_addresses=True,
+        )
+
+        ip = IPAddress.objects.get(address="10.0.0.1/30")
+        self.assertEqual(ip.assigned_object, iface)
+        self.assertEqual(result.interfaces_created, 0)
+        self.assertEqual(result.ips_created, 1)
+
     def test_apply_sets_subinterface_parent(self):
         engine.apply_sync(self.device, _device_data(), dry_run=False)
         sub = Interface.objects.get(device=self.device, name="bridge.10")
@@ -226,6 +270,30 @@ class EngineTestCase(TestCase):
         eth1 = Interface.objects.get(device=self.device, name="ether1")
         self.assertEqual(eth1.untagged_vlan.site, self.device.site)
 
+    def test_subinterface_vlan_write_uses_collected_vlan_not_name_suffix(self):
+        data = DeviceData(target="x", sys_name="sw1", vendor="Cisco")
+        data.vlans.append(VlanData(vid=30, name="Customer"))
+        data.interfaces[1] = InterfaceData(
+            if_index=1, name="GigabitEthernet0/0/0", if_type=6, enabled=True, nb_type="1000base-t",
+        )
+        data.interfaces[2] = InterfaceData(
+            if_index=2,
+            name="GigabitEthernet0/0/0.10",
+            if_type=53,
+            enabled=True,
+            nb_type="virtual",
+            parent_name="GigabitEthernet0/0/0",
+            access_vlan=30,
+        )
+
+        result = engine.apply_sync(self.device, data, dry_run=False, write_vlans=True, create_vlans=True)
+
+        self.assertEqual(result.vlans_created, 1)
+        self.assertTrue(VLAN.objects.filter(vid=30, site=self.device.site).exists())
+        self.assertFalse(VLAN.objects.filter(vid=10, site=self.device.site).exists())
+        sub = Interface.objects.get(device=self.device, name="GigabitEthernet0/0/0.10")
+        self.assertEqual(sub.untagged_vlan.vid, 30)
+
 
 class DeviceSNMPConfigTestCase(TestCase):
     @classmethod
@@ -248,6 +316,38 @@ class DeviceSNMPConfigTestCase(TestCase):
     def test_target_falls_back_when_no_primary_ip(self):
         cfg = DeviceSNMPConfig.objects.create(device=self.device, snmp_version="2c", community="public")
         self.assertEqual(cfg.target, "")
+
+    def test_effective_sync_behaviour_uses_global_defaults_and_device_overrides(self):
+        settings = SNMPSyncConfig.get()
+        settings.sync_interfaces = True
+        settings.sync_ip_addresses = True
+        settings.update_existing = False
+        settings.set_mac_address = True
+        settings.write_vlans = False
+        settings.create_vlans = False
+        settings.vlan_subinterface_inference = "auto"
+        settings.save()
+        cfg = DeviceSNMPConfig.objects.create(
+            device=self.device,
+            snmp_version="2c",
+            community="public",
+            sync_interfaces=False,
+            write_vlans=True,
+        )
+
+        self.assertEqual(cfg.get_effective_sync_behaviour(), {
+            "sync_interfaces": False,
+            "sync_ip_addresses": True,
+            "update_existing": False,
+            "set_mac_address": True,
+            "write_vlans": True,
+            "create_vlans": False,
+        })
+        self.assertEqual(cfg.to_spec().vlan_subinterface_inference, "auto")
+
+        cfg.vlan_subinterface_inference = "disabled"
+        cfg.save()
+        self.assertEqual(cfg.to_spec().vlan_subinterface_inference, "disabled")
 
     def test_job_collection_timeout_raises_clear_error(self):
         async def slow_collect(_spec):
@@ -447,6 +547,7 @@ class DeviceSNMPConfigTestCase(TestCase):
                 "set_mac_address": settings.set_mac_address,
                 "write_vlans": settings.write_vlans,
                 "create_vlans": settings.create_vlans,
+                "vlan_subinterface_inference": settings.vlan_subinterface_inference,
                 "history_keep_days": settings.history_keep_days,
                 "history_keep_count": settings.history_keep_count,
             },
@@ -484,6 +585,7 @@ class DeviceSNMPConfigTestCase(TestCase):
                 "set_mac_address": settings.set_mac_address,
                 "write_vlans": settings.write_vlans,
                 "create_vlans": settings.create_vlans,
+                "vlan_subinterface_inference": settings.vlan_subinterface_inference,
                 "history_keep_days": settings.history_keep_days,
                 "history_keep_count": settings.history_keep_count,
             },
@@ -525,6 +627,7 @@ class DeviceSNMPConfigTestCase(TestCase):
                 "set_mac_address": settings.set_mac_address,
                 "write_vlans": settings.write_vlans,
                 "create_vlans": settings.create_vlans,
+                "vlan_subinterface_inference": settings.vlan_subinterface_inference,
                 "history_keep_days": settings.history_keep_days,
                 "history_keep_count": settings.history_keep_count,
             },

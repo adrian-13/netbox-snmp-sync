@@ -87,3 +87,15 @@ class SyncStatusChoices(ChoiceSet):
         (OK, "OK", "green"),
         (FAILED, "Failed", "red"),
     ]
+
+
+class VlanSubinterfaceInferenceChoices(ChoiceSet):
+    AUTO = "auto"
+    ENABLED = "enabled"
+    DISABLED = "disabled"
+
+    CHOICES = [
+        (AUTO, "Auto", "blue"),
+        (ENABLED, "Enabled", "green"),
+        (DISABLED, "Disabled", "red"),
+    ]

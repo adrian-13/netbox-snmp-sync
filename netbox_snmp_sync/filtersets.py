@@ -8,6 +8,8 @@ class DeviceSNMPConfigFilterSet(NetBoxModelFilterSet):
         model = DeviceSNMPConfig
         fields = (
             "id", "device", "enabled", "snmp_version", "port", "rename_device_to_sysname",
+            "sync_interfaces", "sync_ip_addresses", "update_existing", "set_mac_address",
+            "write_vlans", "create_vlans", "vlan_subinterface_inference",
             "sync_interval_hours", "sync_at_hours",
             "last_sync_status", "next_sync_at",
         )

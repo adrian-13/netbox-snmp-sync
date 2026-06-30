@@ -118,16 +118,19 @@ def _sync_one(config, *, mode, trigger, logger=None, user=None, reset_schedule=F
 
     _log("info", f"{spec.target}: sysName={data.sys_name}, "
                  f"{len(data.interfaces)} interfaces, {len(data.ip_addresses)} IPs")
+    behaviour = config.get_effective_sync_behaviour()
 
     if mode in (SyncModeChoices.APPLY, SyncModeChoices.DRY_RUN):
         with event_tracking(_fake_request(user)):
             result = engine.apply_sync(
                 device, data,
                 dry_run=(mode == SyncModeChoices.DRY_RUN),
-                update_existing=bool(get_setting("update_existing")),
-                set_mac_address=bool(get_setting("set_mac_address")),
-                write_vlans=bool(get_setting("write_vlans")),
-                create_vlans=bool(get_setting("create_vlans")),
+                update_existing=behaviour["update_existing"],
+                set_mac_address=behaviour["set_mac_address"],
+                sync_interfaces=behaviour["sync_interfaces"],
+                sync_ip_addresses=behaviour["sync_ip_addresses"],
+                write_vlans=behaviour["write_vlans"],
+                create_vlans=behaviour["create_vlans"],
                 rename_device_to_sysname=bool(config.rename_device_to_sysname),
             )
         verb = "would create" if mode == SyncModeChoices.DRY_RUN else "created"
@@ -164,7 +167,12 @@ def _sync_one(config, *, mode, trigger, logger=None, user=None, reset_schedule=F
         return summary
 
     # read-only compare
-    diff = engine.compare_device(device, data)
+    diff = engine.compare_device(
+        device,
+        data,
+        sync_interfaces=behaviour["sync_interfaces"],
+        sync_ip_addresses=behaviour["sync_ip_addresses"],
+    )
     summary = (f"{diff.new_interfaces} new / {diff.changed_interfaces} changed interfaces, "
                f"{diff.new_ips} new IPs, {len(diff.netbox_only_interfaces)} only in NetBox")
     run = SyncRun.objects.create(

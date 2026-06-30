@@ -52,6 +52,10 @@
     <tr><th scope="row">Community</th><td>{{ snmp_config.community|placeholder }}</td></tr>
     <tr><th scope="row">Target</th><td>{{ snmp_config.target|placeholder }}</td></tr>
     <tr><th scope="row">Rename to sysName</th><td>{{ snmp_config.rename_device_to_sysname|yesno:"Yes,No" }}</td></tr>
+    <tr><th scope="row">Interfaces</th><td>{{ snmp_config.sync_interfaces_label }}</td></tr>
+    <tr><th scope="row">IP addresses</th><td>{{ snmp_config.sync_ip_addresses_label }}</td></tr>
+    <tr><th scope="row">VLANs</th><td>{{ snmp_config.write_vlans_label }}; create {{ snmp_config.create_vlans_label }}</td></tr>
+    <tr><th scope="row">Subinterface VLANs</th><td>{{ snmp_config.vlan_subinterface_inference_label }}</td></tr>
     <tr><th scope="row">Schedule</th><td>
       <span class="badge text-bg-{{ snmp_config.schedule_color }}">{{ snmp_config.schedule_label }}</span>
     </td></tr>

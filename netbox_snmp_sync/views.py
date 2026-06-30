@@ -18,7 +18,7 @@ from . import engine, filtersets, forms, tables
 from .choices import SyncModeChoices, SyncStatusChoices, SyncTriggerChoices
 from .dto import deserialize_device_data, serialize_device_data
 from .jobs import SNMPSyncJob
-from .models import DeviceSNMPConfig, SNMPSyncConfig, SyncRun, get_setting, record_created_objects, record_sync_changes
+from .models import DeviceSNMPConfig, SNMPSyncConfig, SyncRun, record_created_objects, record_sync_changes
 from .snmp_collector import collect_with_ping, quick_snmp_sys_name
 
 
@@ -356,7 +356,13 @@ class DeviceSNMPConfigPreviewView(LoginRequiredMixin, View):
         except Exception as exc:  # noqa: BLE001
             messages.error(request, f"SNMP collection failed: {exc}")
             return redirect(config.get_absolute_url())
-        diff = engine.compare_device(config.device, data)
+        behaviour = config.get_effective_sync_behaviour()
+        diff = engine.compare_device(
+            config.device,
+            data,
+            sync_interfaces=behaviour["sync_interfaces"],
+            sync_ip_addresses=behaviour["sync_ip_addresses"],
+        )
         return render(request, self.template_name, {
             "object": config,
             "device": config.device,
@@ -365,8 +371,10 @@ class DeviceSNMPConfigPreviewView(LoginRequiredMixin, View):
             "rename_device_pending": _rename_device_to_sysname_pending(config, data),
             "diff": diff,
             "vlan_rows": _vlan_preview_rows(data),
-            "write_vlans_enabled": bool(get_setting("write_vlans")),
-            "create_vlans_enabled": bool(get_setting("create_vlans")),
+            "sync_interfaces_enabled": behaviour["sync_interfaces"],
+            "sync_ip_addresses_enabled": behaviour["sync_ip_addresses"],
+            "write_vlans_enabled": behaviour["write_vlans"],
+            "create_vlans_enabled": behaviour["create_vlans"],
             "snapshot": json.dumps(serialize_device_data(data)),
         })
 
@@ -383,8 +391,9 @@ class DeviceSNMPConfigPreviewView(LoginRequiredMixin, View):
 
         selected_ifaces = set(request.POST.getlist("iface"))
         selected_ips = set(request.POST.getlist("ip"))
-        write_vlans = bool(get_setting("write_vlans"))
-        create_vlans = bool(get_setting("create_vlans"))
+        behaviour = config.get_effective_sync_behaviour()
+        write_vlans = behaviour["write_vlans"]
+        create_vlans = behaviour["create_vlans"]
         selected_vlan_ifaces = set(request.POST.getlist("vlan_iface")) if write_vlans else set()
         selected_ip_ifindexes = {
             ip.if_index for ip in data.ip_addresses
@@ -404,8 +413,10 @@ class DeviceSNMPConfigPreviewView(LoginRequiredMixin, View):
 
         result = engine.apply_sync(
             config.device, data, dry_run=False,
-            update_existing=bool(get_setting("update_existing")),
-            set_mac_address=bool(get_setting("set_mac_address")),
+            update_existing=behaviour["update_existing"],
+            set_mac_address=behaviour["set_mac_address"],
+            sync_interfaces=behaviour["sync_interfaces"],
+            sync_ip_addresses=behaviour["sync_ip_addresses"],
             write_vlans=write_vlans,
             create_vlans=create_vlans,
             rename_device_to_sysname=bool(config.rename_device_to_sysname),

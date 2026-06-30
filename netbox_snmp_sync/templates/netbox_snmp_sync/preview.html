@@ -61,7 +61,7 @@
           </td>
         </tr>
         {% empty %}
-        <tr><td colspan="7" class="text-muted">No interfaces reported.</td></tr>
+        <tr><td colspan="7" class="text-muted">{% if sync_interfaces_enabled %}No interfaces reported.{% else %}Interface sync is disabled for this device.{% endif %}</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -90,7 +90,7 @@
           <td>{{ ip.iface }}</td>
         </tr>
         {% empty %}
-        <tr><td colspan="4" class="text-muted">No IP addresses reported.</td></tr>
+        <tr><td colspan="4" class="text-muted">{% if sync_ip_addresses_enabled %}No IP addresses reported.{% else %}IP address sync is disabled for this device.{% endif %}</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -120,7 +120,7 @@
         <div class="card-footer text-muted">Missing VLANs will be created in the device site.</div>
       {% endif %}
     {% else %}
-      <div class="card-body text-muted">VLAN membership writes are disabled in SNMP Sync settings.</div>
+      <div class="card-body text-muted">VLAN membership writes are disabled for this device.</div>
     {% endif %}
   </div>
 

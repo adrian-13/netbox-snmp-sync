@@ -9,7 +9,7 @@ from netbox_snmp_sync import snmp_collector
 
 class VLANCollectionTestCase(SimpleTestCase):
     def test_collects_vlans_from_q_bridge_and_subinterfaces(self):
-        device = DeviceData(target="10.0.0.1")
+        device = DeviceData(target="10.0.0.1", vendor="MikroTik")
         device.interfaces[1] = InterfaceData(if_index=1, name="ether1", if_type=6)
         device.interfaces[2] = InterfaceData(if_index=2, name="bridge", if_type=209)
         device.interfaces[3] = InterfaceData(if_index=3, name="bridge.20 - Guests", if_type=135)
@@ -33,7 +33,7 @@ class VLANCollectionTestCase(SimpleTestCase):
         ])
 
     def test_collects_cisco_vlan_names_from_vtp_mib(self):
-        device = DeviceData(target="10.0.0.1")
+        device = DeviceData(target="10.0.0.1", vendor="MikroTik")
 
         async def fake_walk(_engine, _auth, _target, oid):
             if oid == snmp_collector.OID_CISCO_VTP_VLAN_NAME:
@@ -50,6 +50,71 @@ class VLANCollectionTestCase(SimpleTestCase):
             (10, "Users"),
             (20, "Voice"),
         ])
+
+    def test_does_not_infer_cisco_vlan_from_subinterface_suffix(self):
+        device = DeviceData(target="10.0.0.1", vendor="Cisco")
+        device.interfaces[101] = InterfaceData(if_index=101, name="GigabitEthernet0/0/0", if_type=6)
+        device.interfaces[102] = InterfaceData(if_index=102, name="GigabitEthernet0/0/0.10", if_type=53)
+        snmp_collector._assign_parents(device)
+
+        async def fake_walk(_engine, _auth, _target, _oid):
+            return {}
+
+        with patch("netbox_snmp_sync.snmp_collector._walk", new=fake_walk):
+            vlans = asyncio.run(snmp_collector._collect_vlans(None, None, None, device))
+            asyncio.run(snmp_collector._collect_port_vlans(None, None, None, device))
+
+        self.assertEqual(vlans, [])
+        self.assertEqual(device.interfaces[101].tagged_vlans, [])
+        self.assertEqual(device.interfaces[102].tagged_vlans, [])
+
+    def test_auto_infers_mikrotik_vlan_from_subinterface_suffix(self):
+        device = DeviceData(target="10.0.0.1", vendor="MikroTik")
+        device.interfaces[1] = InterfaceData(if_index=1, name="ether1", if_type=6)
+        device.interfaces[2] = InterfaceData(if_index=2, name="ether1.30", if_type=135)
+        snmp_collector._assign_parents(device)
+
+        async def fake_walk(_engine, _auth, _target, _oid):
+            return {}
+
+        with patch("netbox_snmp_sync.snmp_collector._walk", new=fake_walk):
+            vlans = asyncio.run(snmp_collector._collect_vlans(None, None, None, device))
+            asyncio.run(snmp_collector._collect_port_vlans(None, None, None, device))
+
+        self.assertEqual([(v.vid, v.name) for v in vlans], [(30, "VLAN30")])
+        self.assertEqual(device.interfaces[1].tagged_vlans, [30])
+
+    def test_auto_does_not_infer_unknown_vendor_vlan_from_subinterface_suffix(self):
+        device = DeviceData(target="10.0.0.1")
+        device.interfaces[1] = InterfaceData(if_index=1, name="ether1", if_type=6)
+        device.interfaces[2] = InterfaceData(if_index=2, name="ether1.30", if_type=135)
+        snmp_collector._assign_parents(device)
+
+        async def fake_walk(_engine, _auth, _target, _oid):
+            return {}
+
+        with patch("netbox_snmp_sync.snmp_collector._walk", new=fake_walk):
+            vlans = asyncio.run(snmp_collector._collect_vlans(None, None, None, device))
+            asyncio.run(snmp_collector._collect_port_vlans(None, None, None, device))
+
+        self.assertEqual(vlans, [])
+        self.assertEqual(device.interfaces[1].tagged_vlans, [])
+
+    def test_can_force_vlan_inference_for_any_vendor(self):
+        device = DeviceData(target="10.0.0.1", vendor="Cisco", vlan_subinterface_inference="enabled")
+        device.interfaces[101] = InterfaceData(if_index=101, name="GigabitEthernet0/0/0", if_type=6)
+        device.interfaces[102] = InterfaceData(if_index=102, name="GigabitEthernet0/0/0.30", if_type=53)
+        snmp_collector._assign_parents(device)
+
+        async def fake_walk(_engine, _auth, _target, _oid):
+            return {}
+
+        with patch("netbox_snmp_sync.snmp_collector._walk", new=fake_walk):
+            vlans = asyncio.run(snmp_collector._collect_vlans(None, None, None, device))
+            asyncio.run(snmp_collector._collect_port_vlans(None, None, None, device))
+
+        self.assertEqual([(v.vid, v.name) for v in vlans], [(30, "VLAN30")])
+        self.assertEqual(device.interfaces[101].tagged_vlans, [30])
 
     def test_collects_vlan_ids_from_q_bridge_port_lists_without_names(self):
         device = DeviceData(target="10.0.0.1")
@@ -71,7 +136,7 @@ class VLANCollectionTestCase(SimpleTestCase):
         ])
 
     def test_collects_access_and_tagged_vlans_for_interfaces(self):
-        device = DeviceData(target="10.0.0.1")
+        device = DeviceData(target="10.0.0.1", vendor="MikroTik")
         device.interfaces[1] = InterfaceData(if_index=1, name="ether1", if_type=6)
         device.interfaces[2] = InterfaceData(if_index=2, name="bridge", if_type=209)
         device.interfaces[3] = InterfaceData(if_index=3, name="bridge.20 - Guests", if_type=135)

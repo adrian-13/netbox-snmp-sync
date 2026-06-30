@@ -33,6 +33,13 @@
         <tr><th scope="row">Default ethernet type</th><td>{{ object.default_ethernet_type|placeholder }}</td></tr>
         <tr><th scope="row">Skip loopback IPs</th><td>{{ object.skip_loopback_ips|yesno:"Yes,No" }}</td></tr>
         <tr><th scope="row">Rename device to sysName</th><td>{{ object.rename_device_to_sysname|yesno:"Yes,No" }}</td></tr>
+        <tr><th scope="row">Sync interfaces</th><td>{{ object.sync_interfaces_label }}</td></tr>
+        <tr><th scope="row">Sync IP addresses</th><td>{{ object.sync_ip_addresses_label }}</td></tr>
+        <tr><th scope="row">Update existing</th><td>{{ object.update_existing_label }}</td></tr>
+        <tr><th scope="row">Set MAC address</th><td>{{ object.set_mac_address_label }}</td></tr>
+        <tr><th scope="row">Write VLANs</th><td>{{ object.write_vlans_label }}</td></tr>
+        <tr><th scope="row">Create VLANs</th><td>{{ object.create_vlans_label }}</td></tr>
+        <tr><th scope="row">Infer VLANs from subinterfaces</th><td>{{ object.vlan_subinterface_inference_label }}</td></tr>
       </table>
     </div>
     <div class="card">

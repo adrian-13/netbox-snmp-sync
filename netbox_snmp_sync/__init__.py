@@ -8,7 +8,7 @@ run history) lives natively in the NetBox UI and its background-job framework.
 """
 from netbox.plugins import PluginConfig
 
-__version__ = "0.3.7"
+__version__ = "0.3.8"
 
 
 class NetBoxSNMPSyncConfig(PluginConfig):
@@ -35,12 +35,15 @@ class NetBoxSNMPSyncConfig(PluginConfig):
         "snmp_priv_protocol": "none",    # none | des | 3des | aes128 | aes192 | aes256
         # interface typing / behaviour (see standalone DeviceConfig)
         "default_ethernet_type": "1000base-t",
+        "sync_interfaces": True,
+        "sync_ip_addresses": True,
         "set_mac_address": True,
         "update_existing": False,        # also overwrite changed fields on existing interfaces
         "skip_loopback_ips": True,
         # VLAN membership (off by default — only works if VLANs exist, writes to existing ifaces)
         "write_vlans": False,
         "create_vlans": False,           # auto-create missing VLANs in the device's site
+        "vlan_subinterface_inference": "auto",  # auto | enabled | disabled
         # scheduler: hours between automatic syncs; 0 disables the periodic job
         "sync_interval_hours": 0,
         # scheduler: restrict syncs to these hours of the day (e.g. "3" or "3,15"); blank = any

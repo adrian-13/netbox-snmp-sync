@@ -382,6 +382,7 @@ async def collect(dev: DeviceConfig) -> DeviceData:
         # Manual vendor override (from config) wins; else detect from sysObjectID.
         vendor=(dev.vendor or None) or _vendor_from_sysoid(
             _to_str(sys_oid_val) if sys_oid_val is not None else None),
+        vlan_subinterface_inference=dev.vlan_subinterface_inference,
     )
 
     indexes = {int(i) for i in if_descr if i.isdigit()} | {int(i) for i in if_name if i.isdigit()}
@@ -515,6 +516,24 @@ def _vlan_comment(iface_name: str) -> str:
     return iface_name[sep + 3:].strip() if sep > 0 else ""
 
 
+def _infer_vlans_from_subinterfaces(device: DeviceData) -> bool:
+    """Return whether dot-suffix VLAN inference is safe for this vendor.
+
+    ``enabled`` and ``disabled`` are explicit operator overrides. In ``auto`` mode,
+    RouterOS exposes VLANs primarily as ``parent.<vid>`` interfaces, so parsing the suffix
+    is useful for MikroTik. Cisco subinterfaces are often named ``Gi0/0/0.<unit>`` where
+    the unit is not guaranteed to equal the 802.1Q VLAN ID; treating it as a VID can create
+    false VLANs and parent tagged assignments.
+    """
+    mode = (device.vlan_subinterface_inference or "auto").strip().lower()
+    if mode == "enabled":
+        return True
+    if mode == "disabled":
+        return False
+    vendor = (device.vendor or "").strip().lower()
+    return vendor == "mikrotik"
+
+
 async def _collect_vlans(engine, auth, target, device: DeviceData) -> list[VlanData]:
     """802.1Q VLANs from two sources, merged by VID:
 
@@ -567,19 +586,20 @@ async def _collect_vlans(engine, auth, target, device: DeviceData) -> list[VlanD
             if vid is not None:
                 by_vid.setdefault(vid, "")
 
-    # Source 4: VLAN sub-interfaces (parse VID from the dot-notation port token).
-    for iface in device.interfaces.values():
-        port = _port_token(iface.name)
-        if "." not in port:
-            continue
-        tail = port.rsplit(".", 1)[1]
-        if not tail.isdigit():
-            continue
-        vid = int(tail)
-        comment = _vlan_comment(iface.name)
-        # Prefer a non-empty name; don't overwrite an existing name with a blank one.
-        if vid not in by_vid or (not by_vid[vid] and comment):
-            by_vid[vid] = comment or by_vid.get(vid, "")
+    # Source 4: RouterOS-style VLAN sub-interfaces (parse VID from the dot-notation port token).
+    if _infer_vlans_from_subinterfaces(device):
+        for iface in device.interfaces.values():
+            port = _port_token(iface.name)
+            if "." not in port:
+                continue
+            tail = port.rsplit(".", 1)[1]
+            if not tail.isdigit():
+                continue
+            vid = int(tail)
+            comment = _vlan_comment(iface.name)
+            # Prefer a non-empty name; don't overwrite an existing name with a blank one.
+            if vid not in by_vid or (not by_vid[vid] and comment):
+                by_vid[vid] = comment or by_vid.get(vid, "")
 
     vlans = [VlanData(vid=vid, name=name or f"VLAN{vid}") for vid, name in by_vid.items()]
     vlans.sort(key=lambda v: v.vid)
@@ -730,23 +750,24 @@ async def _collect_port_vlans(engine, auth, target, device: DeviceData) -> None:
             if tagged:
                 iface.tagged_vlans = sorted(set(iface.tagged_vlans).union(tagged))
 
-    # --- tagged VLANs inferred from sub-interfaces ---
+    # --- tagged VLANs inferred from RouterOS-style sub-interfaces ---
     # Map each parent interface NAME -> set of VIDs carried by its sub-interfaces.
-    tagged_by_parent: dict[str, set[int]] = {}
-    for iface in device.interfaces.values():
-        if not iface.parent_name:
-            continue
-        port = _port_token(iface.name)
-        if "." not in port:
-            continue
-        tail = port.rsplit(".", 1)[1]
-        if not tail.isdigit():
-            continue
-        tagged_by_parent.setdefault(iface.parent_name, set()).add(int(tail))
-    for iface in device.interfaces.values():
-        vids = tagged_by_parent.get(iface.name)
-        if vids:
-            iface.tagged_vlans = sorted(vids)
+    if _infer_vlans_from_subinterfaces(device):
+        tagged_by_parent: dict[str, set[int]] = {}
+        for iface in device.interfaces.values():
+            if not iface.parent_name:
+                continue
+            port = _port_token(iface.name)
+            if "." not in port:
+                continue
+            tail = port.rsplit(".", 1)[1]
+            if not tail.isdigit():
+                continue
+            tagged_by_parent.setdefault(iface.parent_name, set()).add(int(tail))
+        for iface in device.interfaces.values():
+            vids = tagged_by_parent.get(iface.name)
+            if vids:
+                iface.tagged_vlans = sorted(vids)
 
 
 async def _collect_lldp(engine, auth, target, device: DeviceData) -> list[LldpNeighbor]:

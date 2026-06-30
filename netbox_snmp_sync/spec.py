@@ -28,3 +28,4 @@ class DeviceConfig:
     vendor: str | None = None                # manual override; else detected from sysObjectID
     default_ethernet_type: str = "1000base-t"
     skip_loopback_ips: bool = True
+    vlan_subinterface_inference: str = "auto"  # auto | enabled | disabled

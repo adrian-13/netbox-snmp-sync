@@ -28,6 +28,7 @@ from .choices import (
     SyncModeChoices,
     SyncStatusChoices,
     SyncTriggerChoices,
+    VlanSubinterfaceInferenceChoices,
 )
 from .spec import DeviceConfig
 
@@ -36,6 +37,16 @@ SCHEDULE_SPREAD_MAX_MINUTES = 15
 STALE_SYNC_JOB_MARKER_HOURS = 2
 STALE_SYNC_JOB_MARKER_MESSAGE = "Cleared stale SNMP sync marker after worker restart or lost job."
 ACTIVE_JOB_STATUSES = {"pending", "scheduled", "running"}
+
+
+SYNC_BEHAVIOUR_FIELDS = (
+    "sync_interfaces",
+    "sync_ip_addresses",
+    "update_existing",
+    "set_mac_address",
+    "write_vlans",
+    "create_vlans",
+)
 
 
 class DeviceSNMPConfig(NetBoxModel):
@@ -95,6 +106,55 @@ class DeviceSNMPConfig(NetBoxModel):
         default=False,
         verbose_name="Rename device to sysName",
         help_text="When applying SNMP sync, rename the NetBox device to the collected SNMP sysName.",
+    )
+    sync_interfaces = models.BooleanField(
+        null=True,
+        blank=True,
+        default=None,
+        verbose_name="Sync interfaces",
+        help_text="Override interface create/update sync for this device. Global = use global setting.",
+    )
+    sync_ip_addresses = models.BooleanField(
+        null=True,
+        blank=True,
+        default=None,
+        verbose_name="Sync IP addresses",
+        help_text="Override IP address sync for this device. Global = use global setting.",
+    )
+    update_existing = models.BooleanField(
+        null=True,
+        blank=True,
+        default=None,
+        verbose_name="Update existing objects",
+        help_text="Override updating existing interfaces for this device. Global = use global setting.",
+    )
+    set_mac_address = models.BooleanField(
+        null=True,
+        blank=True,
+        default=None,
+        verbose_name="Set MAC address",
+        help_text="Override primary MAC address writes for this device. Global = use global setting.",
+    )
+    write_vlans = models.BooleanField(
+        null=True,
+        blank=True,
+        default=None,
+        verbose_name="Write VLANs",
+        help_text="Override per-interface VLAN membership writes for this device. Global = use global setting.",
+    )
+    create_vlans = models.BooleanField(
+        null=True,
+        blank=True,
+        default=None,
+        verbose_name="Create VLANs",
+        help_text="Override automatic VLAN creation for this device. Global = use global setting.",
+    )
+    vlan_subinterface_inference = models.CharField(
+        max_length=10,
+        blank=True,
+        choices=VlanSubinterfaceInferenceChoices,
+        verbose_name="Infer VLANs from subinterfaces",
+        help_text="Override dot-suffix VLAN inference for this device. Global = use global setting.",
     )
     sync_interval_hours = models.PositiveIntegerField(
         null=True,
@@ -268,7 +328,59 @@ class DeviceSNMPConfig(NetBoxModel):
             snmp_priv_key=self.priv_key or None,
             default_ethernet_type=self.default_ethernet_type or default("default_ethernet_type"),
             skip_loopback_ips=self.skip_loopback_ips,
+            vlan_subinterface_inference=self.get_effective_vlan_subinterface_inference(),
         )
+
+    def get_effective_sync_behaviour(self):
+        """Return write/compare behaviour after applying per-device overrides."""
+        return {
+            field: bool(get_setting(field) if getattr(self, field) is None else getattr(self, field))
+            for field in SYNC_BEHAVIOUR_FIELDS
+        }
+
+    def get_sync_behaviour_label(self, field):
+        value = getattr(self, field)
+        if value is None:
+            return f"Global ({'Yes' if bool(get_setting(field)) else 'No'})"
+        return "Yes" if value else "No"
+
+    @property
+    def sync_interfaces_label(self):
+        return self.get_sync_behaviour_label("sync_interfaces")
+
+    @property
+    def sync_ip_addresses_label(self):
+        return self.get_sync_behaviour_label("sync_ip_addresses")
+
+    @property
+    def update_existing_label(self):
+        return self.get_sync_behaviour_label("update_existing")
+
+    @property
+    def set_mac_address_label(self):
+        return self.get_sync_behaviour_label("set_mac_address")
+
+    @property
+    def write_vlans_label(self):
+        return self.get_sync_behaviour_label("write_vlans")
+
+    @property
+    def create_vlans_label(self):
+        return self.get_sync_behaviour_label("create_vlans")
+
+    def get_effective_vlan_subinterface_inference(self):
+        return self.vlan_subinterface_inference or get_setting("vlan_subinterface_inference") or VlanSubinterfaceInferenceChoices.AUTO
+
+    @property
+    def vlan_subinterface_inference_label(self):
+        if self.vlan_subinterface_inference:
+            return self.get_vlan_subinterface_inference_display()
+        value = self.get_effective_vlan_subinterface_inference()
+        label = next(
+            (choice[1] for choice in VlanSubinterfaceInferenceChoices.CHOICES if choice[0] == value),
+            value,
+        )
+        return f"Global ({label})"
 
     def get_effective_sync_interval_hours(self):
         if self.sync_interval_hours is not None:
@@ -655,10 +767,19 @@ class SNMPSyncConfig(NetBoxModel):
                   "marker cleanup for active-looking jobs.",
     )
     # sync behaviour
+    sync_interfaces = models.BooleanField(default=True, help_text="Create and update interfaces from SNMP.")
+    sync_ip_addresses = models.BooleanField(default=True, help_text="Create IP addresses from SNMP.")
     update_existing = models.BooleanField(default=False, help_text="Also overwrite changed fields on existing interfaces.")
     set_mac_address = models.BooleanField(default=True)
     write_vlans = models.BooleanField(default=False, help_text="Write per-interface VLAN membership.")
     create_vlans = models.BooleanField(default=False, help_text="Auto-create missing VLANs in the device's site.")
+    vlan_subinterface_inference = models.CharField(
+        max_length=10,
+        choices=VlanSubinterfaceInferenceChoices,
+        default=VlanSubinterfaceInferenceChoices.AUTO,
+        verbose_name="Infer VLANs from subinterfaces",
+        help_text="Controls whether interface names like parent.30 are treated as VLAN 30. Auto enables this for MikroTik only.",
+    )
     # history retention (prune job)
     history_keep_days = models.PositiveIntegerField(default=90)
     history_keep_count = models.PositiveIntegerField(default=1000)
@@ -668,7 +789,8 @@ class SNMPSyncConfig(NetBoxModel):
     # their ultimate fallback is the plugin's default_settings (via get_setting()).
     _SEED_FIELDS = (
         "sync_interval_hours", "sync_at_hours", "sync_job_timeout_seconds", "sync_stale_job_marker_minutes",
-        "update_existing", "set_mac_address", "write_vlans", "create_vlans",
+        "sync_interfaces", "sync_ip_addresses", "update_existing", "set_mac_address", "write_vlans", "create_vlans",
+        "vlan_subinterface_inference",
         "history_keep_days", "history_keep_count",
     )
 

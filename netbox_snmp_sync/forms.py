@@ -1,5 +1,6 @@
 from django import forms
 from django.core.exceptions import ValidationError
+from django.utils.html import format_html, format_html_join
 from django.utils import timezone
 
 from dcim.models import Device
@@ -12,8 +13,102 @@ from utilities.forms.fields import (
 )
 from utilities.forms.widgets import BulkEditNullBooleanSelect
 
-from .choices import SNMPVersionChoices
+from .choices import SNMPVersionChoices, VlanSubinterfaceInferenceChoices
 from .models import DeviceSNMPConfig, SNMPSyncConfig, normalize_sync_hours
+
+
+NULLABLE_BOOLEAN_OVERRIDE_CHOICES = (
+    ("", "Global"),
+    ("true", "Enable"),
+    ("false", "Disable"),
+)
+
+VLAN_INFERENCE_OVERRIDE_CHOICES = (
+    ("", "Global"),
+    (VlanSubinterfaceInferenceChoices.AUTO, "Auto"),
+    (VlanSubinterfaceInferenceChoices.ENABLED, "Enabled"),
+    (VlanSubinterfaceInferenceChoices.DISABLED, "Disabled"),
+)
+
+VLAN_INFERENCE_BULK_CHOICES = (
+    ("", "---------"),
+    (VlanSubinterfaceInferenceChoices.AUTO, "Auto"),
+    (VlanSubinterfaceInferenceChoices.ENABLED, "Enabled"),
+    (VlanSubinterfaceInferenceChoices.DISABLED, "Disabled"),
+)
+
+
+def coerce_nullable_boolean(value):
+    if value in (True, "True", "true", "1", 1):
+        return True
+    if value in (False, "False", "false", "0", 0):
+        return False
+    return None
+
+
+class SegmentedBooleanOverrideWidget(forms.RadioSelect):
+    """Compact Global/On/Off selector for nullable per-device overrides."""
+
+    def render(self, name, value, attrs=None, renderer=None):
+        attrs = attrs or {}
+        field_id = attrs.get("id") or f"id_{name}"
+        selected = self._normalise_value(value)
+        rows = []
+
+        for index, (choice_value, label) in enumerate(self.choices):
+            choice_id = f"{field_id}_{index}"
+            rows.append((
+                choice_id,
+                name,
+                choice_value,
+                " checked" if choice_value == selected else "",
+                self._button_class(choice_value),
+                label,
+            ))
+
+        inputs = format_html_join(
+            "",
+            (
+                '<input type="radio" class="btn-check" name="{}" id="{}" value="{}" autocomplete="off"{}>'
+                '<label class="btn {}" for="{}">{}</label>'
+            ),
+            (
+                (name, choice_id, choice_value, checked, button_class, choice_id, label)
+                for choice_id, name, choice_value, checked, button_class, label in rows
+            ),
+        )
+        return format_html(
+            '<div class="d-block"><div class="btn-group btn-group-sm snmp-sync-override" role="group">{}</div></div>',
+            inputs,
+        )
+
+    @staticmethod
+    def _normalise_value(value):
+        if value in (True, "True", "true", "1", 1):
+            return "true"
+        if value in (False, "False", "false", "0", 0):
+            return "false"
+        return ""
+
+    @staticmethod
+    def _button_class(value):
+        return {
+            "true": "btn-outline-success",
+            "false": "btn-outline-danger",
+        }.get(value, "btn-outline-secondary")
+
+
+class NullableBooleanOverrideField(forms.TypedChoiceField):
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("choices", NULLABLE_BOOLEAN_OVERRIDE_CHOICES)
+        kwargs.setdefault("coerce", coerce_nullable_boolean)
+        kwargs.setdefault("empty_value", None)
+        kwargs.setdefault("required", False)
+        kwargs.setdefault("widget", SegmentedBooleanOverrideWidget)
+        super().__init__(*args, **kwargs)
+
+    def prepare_value(self, value):
+        return SegmentedBooleanOverrideWidget._normalise_value(value)
 
 
 class SyncHoursFormMixin:
@@ -27,6 +122,33 @@ class SyncHoursFormMixin:
 
 class DeviceSNMPConfigForm(SyncHoursFormMixin, NetBoxModelForm):
     device = DynamicModelChoiceField(queryset=Device.objects.all())
+    sync_interfaces = NullableBooleanOverrideField()
+    sync_ip_addresses = NullableBooleanOverrideField()
+    update_existing = NullableBooleanOverrideField()
+    set_mac_address = NullableBooleanOverrideField()
+    write_vlans = NullableBooleanOverrideField()
+    create_vlans = NullableBooleanOverrideField()
+    vlan_subinterface_inference = forms.ChoiceField(
+        choices=VLAN_INFERENCE_OVERRIDE_CHOICES,
+        required=False,
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        for name in (
+            "sync_interfaces",
+            "sync_ip_addresses",
+            "update_existing",
+            "set_mac_address",
+            "write_vlans",
+            "create_vlans",
+        ):
+            model_field = DeviceSNMPConfig._meta.get_field(name)
+            self.fields[name].label = model_field.verbose_name.capitalize()
+            self.fields[name].help_text = ""
+        model_field = DeviceSNMPConfig._meta.get_field("vlan_subinterface_inference")
+        self.fields["vlan_subinterface_inference"].label = model_field.verbose_name.capitalize()
+        self.fields["vlan_subinterface_inference"].help_text = model_field.help_text
 
     class Meta:
         model = DeviceSNMPConfig
@@ -47,6 +169,13 @@ class DeviceSNMPConfigForm(SyncHoursFormMixin, NetBoxModelForm):
             "default_ethernet_type",
             "skip_loopback_ips",
             "rename_device_to_sysname",
+            "sync_interfaces",
+            "sync_ip_addresses",
+            "update_existing",
+            "set_mac_address",
+            "write_vlans",
+            "create_vlans",
+            "vlan_subinterface_inference",
             "sync_interval_hours",
             "sync_at_hours",
             "tags",
@@ -67,10 +196,31 @@ class DeviceSNMPConfigBulkEditForm(SyncHoursFormMixin, NetBoxModelBulkEditForm):
     target_override = forms.CharField(required=False)
     skip_loopback_ips = forms.NullBooleanField(required=False, widget=BulkEditNullBooleanSelect())
     rename_device_to_sysname = forms.NullBooleanField(required=False, widget=BulkEditNullBooleanSelect())
+    sync_interfaces = forms.NullBooleanField(required=False, widget=BulkEditNullBooleanSelect())
+    sync_ip_addresses = forms.NullBooleanField(required=False, widget=BulkEditNullBooleanSelect())
+    update_existing = forms.NullBooleanField(required=False, widget=BulkEditNullBooleanSelect())
+    set_mac_address = forms.NullBooleanField(required=False, widget=BulkEditNullBooleanSelect())
+    write_vlans = forms.NullBooleanField(required=False, widget=BulkEditNullBooleanSelect())
+    create_vlans = forms.NullBooleanField(required=False, widget=BulkEditNullBooleanSelect())
+    vlan_subinterface_inference = forms.ChoiceField(
+        choices=VLAN_INFERENCE_BULK_CHOICES,
+        required=False,
+    )
     sync_interval_hours = forms.IntegerField(required=False, min_value=0)
     sync_at_hours = forms.CharField(required=False)
 
-    nullable_fields = ("community", "target_override", "sync_interval_hours")
+    nullable_fields = (
+        "community",
+        "target_override",
+        "sync_interfaces",
+        "sync_ip_addresses",
+        "update_existing",
+        "set_mac_address",
+        "write_vlans",
+            "create_vlans",
+            "vlan_subinterface_inference",
+            "sync_interval_hours",
+    )
 
 
 class DeviceSNMPConfigImportForm(SyncHoursFormMixin, NetBoxModelImportForm):
@@ -87,6 +237,8 @@ class DeviceSNMPConfigImportForm(SyncHoursFormMixin, NetBoxModelImportForm):
             "username", "auth_protocol", "auth_key", "priv_protocol", "priv_key",
             "timeout", "retries", "target_override", "default_ethernet_type", "skip_loopback_ips",
             "rename_device_to_sysname",
+            "sync_interfaces", "sync_ip_addresses", "update_existing", "set_mac_address",
+            "write_vlans", "create_vlans", "vlan_subinterface_inference",
             "sync_interval_hours", "sync_at_hours",
         )
 
@@ -99,7 +251,9 @@ class SNMPSyncConfigForm(NetBoxModelForm):
         fields = (
             "sync_interval_hours", "sync_at_hours", "sync_job_timeout_seconds",
             "sync_stale_job_marker_minutes",
+            "sync_interfaces", "sync_ip_addresses",
             "update_existing", "set_mac_address", "write_vlans", "create_vlans",
+            "vlan_subinterface_inference",
             "history_keep_days", "history_keep_count",
         )
 
