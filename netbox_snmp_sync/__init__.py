@@ -52,6 +52,8 @@ class NetBoxSNMPSyncConfig(PluginConfig):
         "sync_job_timeout_seconds": 300,
         # stale queued/running marker recovery after worker/container restarts; 0 disables
         "sync_stale_job_marker_minutes": 120,
+        # after long scheduler downtime, skip missed catch-up and re-anchor next run; 0 disables
+        "sync_missed_schedule_grace_minutes": 360,
         # history retention (daily prune job): keep at most N runs and/or runs newer than D days
         "history_keep_days": 90,
         "history_keep_count": 1000,

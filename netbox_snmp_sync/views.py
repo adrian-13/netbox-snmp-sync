@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from django.contrib import messages
 from django.contrib.auth.mixins import LoginRequiredMixin
+from django.db import transaction
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
@@ -411,38 +412,39 @@ class DeviceSNMPConfigPreviewView(LoginRequiredMixin, View):
             messages.warning(request, "Nothing selected to write.")
             return redirect(reverse("plugins:netbox_snmp_sync:devicesnmpconfig_preview", args=[pk]))
 
-        result = engine.apply_sync(
-            config.device, data, dry_run=False,
-            update_existing=behaviour["update_existing"],
-            set_mac_address=behaviour["set_mac_address"],
-            sync_interfaces=behaviour["sync_interfaces"],
-            sync_ip_addresses=behaviour["sync_ip_addresses"],
-            write_vlans=write_vlans,
-            create_vlans=create_vlans,
-            rename_device_to_sysname=bool(config.rename_device_to_sysname),
-        )
-        message = (
-            f"Interactive write: {result.interfaces_created} interfaces, {result.ips_created} IPs selected; "
-            f"VLANs set {result.iface_vlans_set}, created {result.vlans_created}; "
-            f"devices renamed {result.devices_updated}"
-        )
-        if result.warnings:
-            message += "; " + "; ".join(result.warnings)
-        rename_messages = _device_rename_messages(result)
-        if rename_messages:
-            message += "; " + "; ".join(rename_messages)
-        run = SyncRun.objects.create(
-            device=config.device, trigger=SyncTriggerChoices.MANUAL, mode=SyncModeChoices.APPLY,
-            status=SyncStatusChoices.OK,
-            interfaces_created=result.interfaces_created, interfaces_updated=result.interfaces_updated,
-            interfaces_existing=result.interfaces_existing, interfaces_ignored=result.interfaces_ignored,
-            ips_created=result.ips_created, ips_existing=result.ips_existing,
-            vlans_created=result.vlans_created, iface_vlans_set=result.iface_vlans_set,
-            message=message,
-        )
-        record_created_objects(run, getattr(result, "created_objects", ()))
-        record_sync_changes(run, getattr(result, "changes", ()))
-        config.record_sync_result(run, update_schedule=False)
+        with transaction.atomic():
+            result = engine.apply_sync(
+                config.device, data, dry_run=False,
+                update_existing=behaviour["update_existing"],
+                set_mac_address=behaviour["set_mac_address"],
+                sync_interfaces=behaviour["sync_interfaces"],
+                sync_ip_addresses=behaviour["sync_ip_addresses"],
+                write_vlans=write_vlans,
+                create_vlans=create_vlans,
+                rename_device_to_sysname=bool(config.rename_device_to_sysname),
+            )
+            message = (
+                f"Interactive write: {result.interfaces_created} interfaces, {result.ips_created} IPs selected; "
+                f"VLANs set {result.iface_vlans_set}, created {result.vlans_created}; "
+                f"devices renamed {result.devices_updated}"
+            )
+            if result.warnings:
+                message += "; " + "; ".join(result.warnings)
+            rename_messages = _device_rename_messages(result)
+            if rename_messages:
+                message += "; " + "; ".join(rename_messages)
+            run = SyncRun.objects.create(
+                device=config.device, trigger=SyncTriggerChoices.MANUAL, mode=SyncModeChoices.APPLY,
+                status=SyncStatusChoices.OK,
+                interfaces_created=result.interfaces_created, interfaces_updated=result.interfaces_updated,
+                interfaces_existing=result.interfaces_existing, interfaces_ignored=result.interfaces_ignored,
+                ips_created=result.ips_created, ips_existing=result.ips_existing,
+                vlans_created=result.vlans_created, iface_vlans_set=result.iface_vlans_set,
+                message=message,
+            )
+            record_created_objects(run, getattr(result, "created_objects", ()))
+            record_sync_changes(run, getattr(result, "changes", ()))
+            config.record_sync_result(run, update_schedule=False)
         messages.success(
             request,
             f"Wrote {result.interfaces_created} interface(s), {result.ips_created} IP(s), "

@@ -10,6 +10,7 @@ import uuid
 from datetime import timedelta
 
 from django.contrib.auth import get_user_model
+from django.db import transaction
 from django.utils import timezone
 
 from core.choices import JobIntervalChoices
@@ -121,44 +122,45 @@ def _sync_one(config, *, mode, trigger, logger=None, user=None, reset_schedule=F
     behaviour = config.get_effective_sync_behaviour()
 
     if mode in (SyncModeChoices.APPLY, SyncModeChoices.DRY_RUN):
-        with event_tracking(_fake_request(user)):
-            result = engine.apply_sync(
-                device, data,
-                dry_run=(mode == SyncModeChoices.DRY_RUN),
-                update_existing=behaviour["update_existing"],
-                set_mac_address=behaviour["set_mac_address"],
-                sync_interfaces=behaviour["sync_interfaces"],
-                sync_ip_addresses=behaviour["sync_ip_addresses"],
-                write_vlans=behaviour["write_vlans"],
-                create_vlans=behaviour["create_vlans"],
-                rename_device_to_sysname=bool(config.rename_device_to_sysname),
+        with transaction.atomic():
+            with event_tracking(_fake_request(user)):
+                result = engine.apply_sync(
+                    device, data,
+                    dry_run=(mode == SyncModeChoices.DRY_RUN),
+                    update_existing=behaviour["update_existing"],
+                    set_mac_address=behaviour["set_mac_address"],
+                    sync_interfaces=behaviour["sync_interfaces"],
+                    sync_ip_addresses=behaviour["sync_ip_addresses"],
+                    write_vlans=behaviour["write_vlans"],
+                    create_vlans=behaviour["create_vlans"],
+                    rename_device_to_sysname=bool(config.rename_device_to_sysname),
+                )
+            verb = "would create" if mode == SyncModeChoices.DRY_RUN else "created"
+            rename_verb = "would rename" if mode == SyncModeChoices.DRY_RUN else "renamed"
+            summary = (f"{verb} {result.interfaces_created} interfaces, {result.ips_created} IPs; "
+                       f"updated {result.interfaces_updated}, existing {result.interfaces_existing}, "
+                       f"ignored {result.interfaces_ignored}; "
+                       f"VLANs set {result.iface_vlans_set}, created {result.vlans_created}; "
+                       f"devices {rename_verb} {result.devices_updated}")
+            msg = summary + (("; " + "; ".join(result.warnings)) if result.warnings else "")
+            rename_messages = _device_rename_messages(result, dry_run=(mode == SyncModeChoices.DRY_RUN))
+            if rename_messages:
+                msg += "; " + "; ".join(rename_messages)
+            run = SyncRun.objects.create(
+                device=device, trigger=trigger, mode=mode, status=SyncStatusChoices.OK,
+                interfaces_created=result.interfaces_created, interfaces_updated=result.interfaces_updated,
+                interfaces_existing=result.interfaces_existing, interfaces_ignored=result.interfaces_ignored,
+                ips_created=result.ips_created, ips_existing=result.ips_existing,
+                vlans_created=result.vlans_created, iface_vlans_set=result.iface_vlans_set,
+                message=msg,
             )
-        verb = "would create" if mode == SyncModeChoices.DRY_RUN else "created"
-        rename_verb = "would rename" if mode == SyncModeChoices.DRY_RUN else "renamed"
-        summary = (f"{verb} {result.interfaces_created} interfaces, {result.ips_created} IPs; "
-                   f"updated {result.interfaces_updated}, existing {result.interfaces_existing}, "
-                   f"ignored {result.interfaces_ignored}; "
-                   f"VLANs set {result.iface_vlans_set}, created {result.vlans_created}; "
-                   f"devices {rename_verb} {result.devices_updated}")
-        msg = summary + (("; " + "; ".join(result.warnings)) if result.warnings else "")
-        rename_messages = _device_rename_messages(result, dry_run=(mode == SyncModeChoices.DRY_RUN))
-        if rename_messages:
-            msg += "; " + "; ".join(rename_messages)
-        run = SyncRun.objects.create(
-            device=device, trigger=trigger, mode=mode, status=SyncStatusChoices.OK,
-            interfaces_created=result.interfaces_created, interfaces_updated=result.interfaces_updated,
-            interfaces_existing=result.interfaces_existing, interfaces_ignored=result.interfaces_ignored,
-            ips_created=result.ips_created, ips_existing=result.ips_existing,
-            vlans_created=result.vlans_created, iface_vlans_set=result.iface_vlans_set,
-            message=msg,
-        )
-        if mode == SyncModeChoices.APPLY:
-            record_created_objects(run, getattr(result, "created_objects", ()))
-            record_sync_changes(run, getattr(result, "changes", ()))
-        config.record_sync_result(
-            run,
-            update_schedule=(trigger == SyncTriggerChoices.SCHEDULED or reset_schedule),
-        )
+            if mode == SyncModeChoices.APPLY:
+                record_created_objects(run, getattr(result, "created_objects", ()))
+                record_sync_changes(run, getattr(result, "changes", ()))
+            config.record_sync_result(
+                run,
+                update_schedule=(trigger == SyncTriggerChoices.SCHEDULED or reset_schedule),
+            )
         _log("info", summary)
         for rename_message in rename_messages:
             _log("info", rename_message)
@@ -215,11 +217,11 @@ class ScheduledSNMPSyncJob(JobRunner):
         name = "Scheduled SNMP Sync"
 
     def run(self, *args, **kwargs):
-        from .models import DeviceSNMPConfig
+        from .models import DeviceSNMPConfig, MISSED_SCHEDULE_MESSAGE
 
         now = timezone.now()
 
-        due = queued = skipped_active = 0
+        due = queued = skipped_active = missed = 0
         for config in DeviceSNMPConfig.objects.filter(enabled=True).select_related("device"):
             if not config.target:
                 continue
@@ -234,6 +236,12 @@ class ScheduledSNMPSyncJob(JobRunner):
             if config.next_sync_at and config.next_sync_at > now:
                 continue
             due += 1
+            if config.is_missed_schedule(now):
+                config.reset_next_sync(now)
+                config.last_sync_message = MISSED_SCHEDULE_MESSAGE
+                config.save(update_fields=("last_sync_message",))
+                missed += 1
+                continue
             if not config.claim_sync_slot(now):
                 skipped_active += 1
                 continue
@@ -255,7 +263,8 @@ class ScheduledSNMPSyncJob(JobRunner):
 
         self.logger.info(
             f"Scheduled SNMP sync: queued {queued}, "
-            f"skipped {skipped_active} already active, {due} due device(s)."
+            f"skipped {skipped_active} already active, "
+            f"re-anchored {missed} missed, {due} due device(s)."
         )
 
 

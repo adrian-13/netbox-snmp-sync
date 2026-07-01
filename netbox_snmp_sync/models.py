@@ -36,6 +36,8 @@ PLUGIN_NAME = "netbox_snmp_sync"
 SCHEDULE_SPREAD_MAX_MINUTES = 15
 STALE_SYNC_JOB_MARKER_HOURS = 2
 STALE_SYNC_JOB_MARKER_MESSAGE = "Cleared stale SNMP sync marker after worker restart or lost job."
+MISSED_SCHEDULE_GRACE_MINUTES = 360
+MISSED_SCHEDULE_MESSAGE = "Re-anchored missed SNMP sync schedule after scheduler downtime."
 ACTIVE_JOB_STATUSES = {"pending", "scheduled", "running"}
 
 
@@ -403,6 +405,29 @@ class DeviceSNMPConfig(NetBoxModel):
     def uses_global_schedule(self):
         return self.sync_interval_hours is None and not self.sync_at_hours
 
+    def is_missed_schedule(self, reference=None):
+        """Return whether a due schedule is old enough to skip as scheduler downtime.
+
+        Short downtime should still catch up by queueing the sync. Once the due timestamp is
+        much older than the configured grace window, re-anchor it so a restarted scheduler does
+        not keep showing yesterday's missed run or stampede every device at once.
+        """
+        reference = reference or timezone.now()
+        grace_minutes = get_missed_schedule_grace_minutes()
+        if grace_minutes <= 0:
+            return False
+        if (
+            not self.enabled
+            or not self.is_schedule_enabled()
+            or not self.next_sync_at
+            or self.sync_job_id
+            or self.is_retrying
+            or not self.last_sync_at
+            or self.last_sync_status != SyncStatusChoices.OK
+        ):
+            return False
+        return self.next_sync_at < reference - timedelta(minutes=grace_minutes)
+
     def get_next_sync_time(self, reference=None, spread_offset=None):
         """Return the next scheduled sync time from a reference point, or None when disabled."""
         reference = reference or timezone.now()
@@ -766,6 +791,12 @@ class SNMPSyncConfig(NetBoxModel):
                   "cleared even if NetBox still shows the old job as active. Use 0 to disable automatic stale "
                   "marker cleanup for active-looking jobs.",
     )
+    sync_missed_schedule_grace_minutes = models.PositiveIntegerField(
+        default=MISSED_SCHEDULE_GRACE_MINUTES,
+        help_text="If a successful device's next scheduled sync is overdue by more than this many minutes, "
+                  "treat it as missed scheduler downtime and re-anchor it instead of queueing a catch-up sync. "
+                  "Use 0 to always catch up overdue schedules.",
+    )
     # sync behaviour
     sync_interfaces = models.BooleanField(default=True, help_text="Create and update interfaces from SNMP.")
     sync_ip_addresses = models.BooleanField(default=True, help_text="Create IP addresses from SNMP.")
@@ -789,6 +820,7 @@ class SNMPSyncConfig(NetBoxModel):
     # their ultimate fallback is the plugin's default_settings (via get_setting()).
     _SEED_FIELDS = (
         "sync_interval_hours", "sync_at_hours", "sync_job_timeout_seconds", "sync_stale_job_marker_minutes",
+        "sync_missed_schedule_grace_minutes",
         "sync_interfaces", "sync_ip_addresses", "update_existing", "set_mac_address", "write_vlans", "create_vlans",
         "vlan_subinterface_inference",
         "history_keep_days", "history_keep_count",
@@ -838,6 +870,16 @@ def get_stale_sync_job_marker_minutes():
         return max(int(value), 0)
     except (TypeError, ValueError):
         return STALE_SYNC_JOB_MARKER_HOURS * 60
+
+
+def get_missed_schedule_grace_minutes():
+    value = get_setting("sync_missed_schedule_grace_minutes")
+    if value is None:
+        return MISSED_SCHEDULE_GRACE_MINUTES
+    try:
+        return max(int(value), 0)
+    except (TypeError, ValueError):
+        return MISSED_SCHEDULE_GRACE_MINUTES
 
 
 def parse_sync_hours(raw):

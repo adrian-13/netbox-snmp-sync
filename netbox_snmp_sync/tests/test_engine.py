@@ -19,6 +19,7 @@ from netbox_snmp_sync.jobs import (
     ScheduledSNMPSyncJob,
     _collect_with_job_timeout,
     _fake_request,
+    _sync_one,
 )
 from netbox_snmp_sync.models import DeviceSNMPConfig, SNMPSyncConfig, SyncRun
 
@@ -357,6 +358,46 @@ class DeviceSNMPConfigTestCase(TestCase):
             with self.assertRaisesRegex(TimeoutError, "timed out after 0.01 seconds"):
                 asyncio.run(_collect_with_job_timeout(object(), 0.01))
 
+    def test_apply_job_rolls_back_partial_writes_when_recording_fails(self):
+        cfg = DeviceSNMPConfig.objects.create(
+            device=self.device,
+            snmp_version="2c",
+            community="public",
+            target_override="10.0.0.1",
+        )
+
+        async def fake_collect(_spec):
+            return _device_data()
+
+        def partial_apply(device, *_args, **_kwargs):
+            iface = Interface.objects.create(device=device, name="partial", type="1000base-t", enabled=True)
+            return SimpleNamespace(
+                interfaces_created=1,
+                interfaces_updated=0,
+                interfaces_existing=0,
+                interfaces_ignored=0,
+                ips_created=0,
+                ips_existing=0,
+                vlans_created=0,
+                iface_vlans_set=0,
+                devices_updated=0,
+                warnings=[],
+                created_objects=[iface],
+                changes=[],
+            )
+
+        with patch("netbox_snmp_sync.jobs.collect_with_ping", side_effect=fake_collect):
+            with patch("netbox_snmp_sync.jobs.engine.apply_sync", side_effect=partial_apply):
+                with patch(
+                    "netbox_snmp_sync.models.record_created_objects",
+                    side_effect=RuntimeError("forced record failure"),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "forced record failure"):
+                        _sync_one(cfg, mode="apply", trigger="manual")
+
+        self.assertFalse(Interface.objects.filter(device=self.device, name="partial").exists())
+        self.assertFalse(SyncRun.objects.filter(device=self.device, status="ok").exists())
+
     def test_scheduled_fake_request_uses_service_user(self):
         request = _fake_request(None)
 
@@ -496,6 +537,54 @@ class DeviceSNMPConfigTestCase(TestCase):
         enqueue.assert_not_called()
         self.assertIsNone(cfg.next_sync_at)
 
+    def test_scheduler_reanchors_missed_schedule_after_long_downtime(self):
+        SNMPSyncConfig.objects.create(sync_interval_hours=1, sync_missed_schedule_grace_minutes=360)
+        cfg = DeviceSNMPConfig.objects.create(
+            device=self.device,
+            snmp_version="2c",
+            community="public",
+            target_override="10.0.0.1",
+        )
+        run = SyncRun.objects.create(device=self.device, trigger="scheduled", mode="apply", status="ok")
+        cfg.record_sync_result(run, update_schedule=False)
+        now = timezone.now()
+        cfg.next_sync_at = now - timedelta(days=1)
+        cfg.save(update_fields=("next_sync_at",))
+        runner = ScheduledSNMPSyncJob(SimpleNamespace(user=None))
+        runner.logger = SimpleNamespace(info=lambda _msg: None)
+
+        with patch("netbox_snmp_sync.jobs.SNMPSyncJob.enqueue") as enqueue:
+            runner.run()
+
+        cfg.refresh_from_db()
+        enqueue.assert_not_called()
+        self.assertGreater(cfg.next_sync_at, now)
+        self.assertEqual(cfg.sync_state, "waiting")
+        self.assertIn("Re-anchored missed SNMP sync schedule", cfg.last_sync_message)
+
+    def test_scheduler_still_queues_recently_due_schedule(self):
+        SNMPSyncConfig.objects.create(sync_interval_hours=1, sync_missed_schedule_grace_minutes=360)
+        cfg = DeviceSNMPConfig.objects.create(
+            device=self.device,
+            snmp_version="2c",
+            community="public",
+            target_override="10.0.0.1",
+        )
+        run = SyncRun.objects.create(device=self.device, trigger="scheduled", mode="apply", status="ok")
+        cfg.record_sync_result(run, update_schedule=False)
+        cfg.next_sync_at = timezone.now() - timedelta(minutes=10)
+        cfg.save(update_fields=("next_sync_at",))
+        fake_job = SimpleNamespace(job_id="11111111-1111-1111-1111-111111111111")
+        runner = ScheduledSNMPSyncJob(SimpleNamespace(user=None))
+        runner.logger = SimpleNamespace(info=lambda _msg: None)
+
+        with patch("netbox_snmp_sync.jobs.SNMPSyncJob.enqueue", return_value=fake_job) as enqueue:
+            runner.run()
+
+        cfg.refresh_from_db()
+        enqueue.assert_called_once()
+        self.assertEqual(str(cfg.sync_job_id), fake_job.job_id)
+
     def test_per_device_schedule_change_reanchors_next_sync(self):
         SNMPSyncConfig.objects.create(sync_interval_hours=24)
         cfg = DeviceSNMPConfig.objects.create(
@@ -543,6 +632,7 @@ class DeviceSNMPConfigTestCase(TestCase):
                 "sync_at_hours": "",
                 "sync_job_timeout_seconds": settings.sync_job_timeout_seconds,
                 "sync_stale_job_marker_minutes": settings.sync_stale_job_marker_minutes,
+                "sync_missed_schedule_grace_minutes": settings.sync_missed_schedule_grace_minutes,
                 "update_existing": settings.update_existing,
                 "set_mac_address": settings.set_mac_address,
                 "write_vlans": settings.write_vlans,
@@ -581,6 +671,7 @@ class DeviceSNMPConfigTestCase(TestCase):
                 "sync_at_hours": "",
                 "sync_job_timeout_seconds": settings.sync_job_timeout_seconds,
                 "sync_stale_job_marker_minutes": settings.sync_stale_job_marker_minutes,
+                "sync_missed_schedule_grace_minutes": settings.sync_missed_schedule_grace_minutes,
                 "update_existing": settings.update_existing,
                 "set_mac_address": settings.set_mac_address,
                 "write_vlans": settings.write_vlans,
@@ -623,6 +714,7 @@ class DeviceSNMPConfigTestCase(TestCase):
                 "sync_at_hours": "",
                 "sync_job_timeout_seconds": settings.sync_job_timeout_seconds,
                 "sync_stale_job_marker_minutes": settings.sync_stale_job_marker_minutes,
+                "sync_missed_schedule_grace_minutes": settings.sync_missed_schedule_grace_minutes,
                 "update_existing": settings.update_existing,
                 "set_mac_address": settings.set_mac_address,
                 "write_vlans": settings.write_vlans,

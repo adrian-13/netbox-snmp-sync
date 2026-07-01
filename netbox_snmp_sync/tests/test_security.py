@@ -174,8 +174,10 @@ class SecurityTestCase(TestCase):
             ips_existing=0,
             iface_vlans_set=1,
             vlans_created=1,
+            devices_updated=0,
             warnings=[],
             created_objects=[],
+            changes=[],
         )
         c = Client()
         c.force_login(self.admin)
@@ -195,6 +197,48 @@ class SecurityTestCase(TestCase):
         self.assertTrue(apply_sync.call_args.kwargs["create_vlans"])
         run = self.cfg.device.snmp_sync_runs.latest("created")
         self.assertIn("VLANs set 1, created 1", run.message)
+
+    def test_preview_write_rolls_back_partial_writes_when_recording_fails(self):
+        from dcim.models import Interface
+
+        data = DeviceData(target="10.0.0.1", sys_name="sw1")
+        data.interfaces[1] = InterfaceData(
+            if_index=1, name="ether1", if_type=6, nb_type="1000base-t",
+        )
+        c = Client()
+        c.force_login(self.admin)
+        url = reverse("plugins:netbox_snmp_sync:devicesnmpconfig_preview", args=[self.cfg.pk])
+
+        def partial_apply(device, *_args, **_kwargs):
+            iface = Interface.objects.create(device=device, name="partial", type="1000base-t", enabled=True)
+            return SimpleNamespace(
+                interfaces_created=1,
+                interfaces_updated=0,
+                interfaces_existing=0,
+                interfaces_ignored=0,
+                ips_created=0,
+                ips_existing=0,
+                iface_vlans_set=0,
+                vlans_created=0,
+                devices_updated=0,
+                warnings=[],
+                created_objects=[iface],
+                changes=[],
+            )
+
+        with patch("netbox_snmp_sync.views.engine.apply_sync", side_effect=partial_apply):
+            with patch(
+                "netbox_snmp_sync.views.record_created_objects",
+                side_effect=RuntimeError("forced record failure"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "forced record failure"):
+                    c.post(url, {
+                        "snapshot": json.dumps(serialize_device_data(data)),
+                        "iface": ["ether1"],
+                    })
+
+        self.assertFalse(Interface.objects.filter(device=self.device, name="partial").exists())
+        self.assertFalse(self.cfg.device.snmp_sync_runs.filter(status="ok").exists())
 
     def test_preview_write_keeps_interface_for_selected_ip(self):
         data = DeviceData(target="10.0.0.1", sys_name="sw1")
