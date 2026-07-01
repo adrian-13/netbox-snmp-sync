@@ -119,6 +119,7 @@ class SecurityTestCase(TestCase):
             ("devicesnmpconfig_sync", [self.cfg.pk]),
             ("devicesnmpconfig_reset_schedule", [self.cfg.pk]),
             ("devicesnmpconfig_reconcile_marker", [self.cfg.pk]),
+            ("devicesnmpconfig_bulk_reset_schedule", []),
             ("devicesnmpconfig_bulk_reconcile_markers", []),
             ("bulk_setup", []),
         ]:
@@ -534,6 +535,44 @@ class SecurityTestCase(TestCase):
         r = c.get(url)
 
         self.assertEqual(r.status_code, 405)
+
+    def test_bulk_reset_schedule_action_does_not_accept_get(self):
+        c = Client()
+        c.force_login(self.admin)
+        url = reverse("plugins:netbox_snmp_sync:devicesnmpconfig_bulk_reset_schedule")
+
+        r = c.get(url)
+
+        self.assertEqual(r.status_code, 405)
+
+    def test_bulk_reset_schedule_action_requires_change_permission(self):
+        original_next = self.cfg.next_sync_at
+        c = Client()
+        c.force_login(self.viewer)
+        url = reverse("plugins:netbox_snmp_sync:devicesnmpconfig_bulk_reset_schedule")
+
+        r = c.post(url, {"pk": [self.cfg.pk]})
+
+        self.assertEqual(r.status_code, 302)
+        self.cfg.refresh_from_db()
+        self.assertEqual(self.cfg.next_sync_at, original_next)
+
+    def test_bulk_reset_schedule_action_allows_change_permission(self):
+        settings = SNMPSyncConfig.get()
+        settings.sync_interval_hours = 8
+        settings.sync_at_hours = ""
+        settings.save()
+        self.cfg.next_sync_at = timezone.now() - timedelta(days=1)
+        self.cfg.save(update_fields=("next_sync_at",))
+        c = Client()
+        c.force_login(self.operator)
+        url = reverse("plugins:netbox_snmp_sync:devicesnmpconfig_bulk_reset_schedule")
+
+        r = c.post(url, {"pk": [self.cfg.pk]})
+
+        self.assertEqual(r.status_code, 302)
+        self.cfg.refresh_from_db()
+        self.assertGreater(self.cfg.next_sync_at, timezone.now())
 
     def test_bulk_reconcile_markers_action_requires_change_permission(self):
         self.cfg.mark_sync_queued(

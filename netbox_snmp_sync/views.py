@@ -293,6 +293,42 @@ class DeviceSNMPConfigBulkReconcileMarkersView(LoginRequiredMixin, View):
         return redirect(self.list_url)
 
 
+@register_model_view(DeviceSNMPConfig, "bulk_reset_schedule", path="reset-schedule", detail=False)
+class DeviceSNMPConfigBulkResetScheduleView(LoginRequiredMixin, View):
+    """Recalculate next scheduled sync for selected SNMP configs."""
+
+    list_url = "plugins:netbox_snmp_sync:devicesnmpconfig_list"
+
+    def post(self, request):
+        if not request.user.has_perm("netbox_snmp_sync.change_devicesnmpconfig"):
+            messages.error(request, "You do not have permission to change SNMP scheduling.")
+            return redirect(self.list_url)
+
+        if request.POST.get("_all"):
+            qs = DeviceSNMPConfig.objects.all()
+        else:
+            qs = DeviceSNMPConfig.objects.filter(pk__in=request.POST.getlist("pk"))
+        configs = list(qs.select_related("device"))
+        if not configs:
+            messages.warning(request, "No SNMP configurations selected.")
+            return redirect(self.list_url)
+
+        now = timezone.now()
+        scheduled = disabled = 0
+        for config in configs:
+            next_sync = config.reset_next_sync(now)
+            if next_sync:
+                scheduled += 1
+            else:
+                disabled += 1
+
+        messages.success(
+            request,
+            f"Recalculated SNMP schedules: scheduled {scheduled}, not scheduled {disabled}.",
+        )
+        return redirect(self.list_url)
+
+
 @register_model_view(DeviceSNMPConfig, name="reset_schedule", path="reset-schedule")
 class DeviceSNMPConfigResetScheduleView(LoginRequiredMixin, View):
     """Recalculate one config's next scheduled sync from its current effective schedule."""
