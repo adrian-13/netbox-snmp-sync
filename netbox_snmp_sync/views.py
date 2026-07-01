@@ -530,6 +530,10 @@ class BulkSNMPConfigView(LoginRequiredMixin, View):
     template_name = "netbox_snmp_sync/bulk_setup.html"
 
     def get(self, request):
+        # Direct URL access must follow the same add permission as the POST handler.
+        if not request.user.has_perm("netbox_snmp_sync.add_devicesnmpconfig"):
+            messages.error(request, "You do not have permission to create SNMP configurations.")
+            return redirect("plugins:netbox_snmp_sync:devicesnmpconfig_list")
         return render(request, self.template_name, {"form": forms.BulkSNMPConfigForm()})
 
     def post(self, request):
