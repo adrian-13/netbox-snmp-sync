@@ -370,6 +370,64 @@ class DeviceSNMPConfigTestCase(TestCase):
         cfg.save()
         self.assertEqual(cfg.to_spec().vlan_subinterface_inference, "disabled")
 
+    def test_setting_vlan_group_assigns_existing_device_vlans(self):
+        untagged = VLAN.objects.create(vid=10, name="ten", site=self.device.site)
+        tagged = VLAN.objects.create(vid=20, name="twenty", site=self.device.site)
+        # mode must be set alongside untagged_vlan/tagged_vlans — NetBox drops both otherwise.
+        Interface.objects.create(
+            device=self.device, name="ether1", type="1000base-t", enabled=True,
+            mode="access", untagged_vlan=untagged,
+        )
+        iface2 = Interface.objects.create(
+            device=self.device, name="ether2", type="1000base-t", enabled=True, mode="tagged",
+        )
+        iface2.tagged_vlans.set([tagged])
+
+        cfg = DeviceSNMPConfig.objects.create(device=self.device, snmp_version="2c", community="public")
+        group = VLANGroup.objects.create(name="Customer VLANs", slug="customer-vlans")
+        cfg.vlan_group = group
+        cfg.save()
+
+        untagged.refresh_from_db()
+        tagged.refresh_from_db()
+        self.assertEqual(untagged.group, group)
+        self.assertEqual(tagged.group, group)
+
+    def test_changing_vlan_group_reassigns_existing_device_vlans(self):
+        old_group = VLANGroup.objects.create(name="Old group", slug="old-group")
+        new_group = VLANGroup.objects.create(name="New group", slug="new-group")
+        vlan = VLAN.objects.create(vid=10, name="ten", site=self.device.site, group=old_group)
+        Interface.objects.create(
+            device=self.device, name="ether1", type="1000base-t", enabled=True,
+            mode="access", untagged_vlan=vlan,
+        )
+        cfg = DeviceSNMPConfig.objects.create(
+            device=self.device, snmp_version="2c", community="public", vlan_group=old_group,
+        )
+
+        cfg.vlan_group = new_group
+        cfg.save()
+
+        vlan.refresh_from_db()
+        self.assertEqual(vlan.group, new_group)
+
+    def test_clearing_vlan_group_does_not_touch_existing_vlans(self):
+        group = VLANGroup.objects.create(name="Customer VLANs", slug="customer-vlans")
+        vlan = VLAN.objects.create(vid=10, name="ten", site=self.device.site, group=group)
+        Interface.objects.create(
+            device=self.device, name="ether1", type="1000base-t", enabled=True,
+            mode="access", untagged_vlan=vlan,
+        )
+        cfg = DeviceSNMPConfig.objects.create(
+            device=self.device, snmp_version="2c", community="public", vlan_group=group,
+        )
+
+        cfg.vlan_group = None
+        cfg.save()
+
+        vlan.refresh_from_db()
+        self.assertEqual(vlan.group, group)
+
     def test_job_collection_timeout_raises_clear_error(self):
         async def slow_collect(_spec):
             await asyncio.sleep(1)

@@ -8,12 +8,13 @@ turned into a collector ``DeviceConfig`` spec — merged with plugin-level defau
 Note: SNMP secrets (community, auth/priv keys) are stored in the database in clear text,
 matching the standalone tool's config.yaml. Restrict access via NetBox permissions.
 """
+import logging
 from datetime import timedelta
 from uuid import UUID, uuid4
 
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
-from django.db import models
+from django.db import models, transaction
 from django.db.models import Q
 from django.urls import reverse
 from django.utils import timezone
@@ -31,6 +32,8 @@ from .choices import (
     VlanSubinterfaceInferenceChoices,
 )
 from .spec import DeviceConfig
+
+log = logging.getLogger("netbox_snmp_sync.models")
 
 PLUGIN_NAME = "netbox_snmp_sync"
 SCHEDULE_SPREAD_MAX_MINUTES = 15
@@ -299,7 +302,7 @@ class DeviceSNMPConfig(NetBoxModel):
         old = None
         if self.pk:
             old = type(self).objects.filter(pk=self.pk).values(
-                "enabled", "sync_interval_hours", "sync_at_hours",
+                "enabled", "sync_interval_hours", "sync_at_hours", "vlan_group_id",
             ).first()
 
         super().save(*args, **kwargs)
@@ -311,6 +314,43 @@ class DeviceSNMPConfig(NetBoxModel):
         )
         if created_without_next_sync or schedule_changed:
             self.reset_next_sync(timezone.now())
+
+        if old is not None and self.vlan_group_id and old["vlan_group_id"] != self.vlan_group_id:
+            self.assign_vlan_group_to_device_vlans()
+
+    def assign_vlan_group_to_device_vlans(self):
+        """Assign this config's ``vlan_group`` to every VLAN already referenced (as untagged
+        or tagged) by the device's interfaces. Runs when ``vlan_group`` changes on an existing
+        config, so picking a group retroactively applies to VLANs from earlier syncs, not just
+        ones the plugin creates going forward.
+
+        Writes go through ordinary per-object saves (not a bulk queryset update) so each change
+        lands in NetBox's audit change log. A VLAN referenced by another device's interfaces too
+        is still updated — VLANs are not device-scoped in NetBox. Returns the number updated.
+        """
+        from dcim.models import Interface
+
+        if not self.vlan_group_id:
+            return 0
+
+        vlans = {}
+        for iface in Interface.objects.filter(device=self.device).prefetch_related("tagged_vlans"):
+            if iface.untagged_vlan_id and iface.untagged_vlan.group_id != self.vlan_group_id:
+                vlans[iface.untagged_vlan_id] = iface.untagged_vlan
+            for vlan in iface.tagged_vlans.all():
+                if vlan.group_id != self.vlan_group_id:
+                    vlans[vlan.pk] = vlan
+
+        updated = 0
+        for vlan in vlans.values():
+            vlan.group_id = self.vlan_group_id
+            try:
+                with transaction.atomic():
+                    vlan.save()
+                updated += 1
+            except Exception as exc:  # noqa: BLE001
+                log.warning("could not assign VLAN group to VLAN %s: %s", vlan, exc)
+        return updated
 
     @property
     def target(self) -> str:
