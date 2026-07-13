@@ -104,6 +104,10 @@ Preview shows the collected `sysName` before writing, and successful renames are
 in the sync run message and change log. When automatic VLAN creation is on, set a
 **VLAN group** on the device's SNMP config to place every VLAN auto-created for that device
 (from Preview & write or a scheduled sync) into that group; leave it blank for no group.
+Setting or changing the VLAN group also retroactively re-assigns every VLAN already
+referenced by the device's interfaces (from before this setting existed, or from manual
+entry) — saving the config is enough, no re-sync needed. Clearing the VLAN group does not
+touch existing VLANs.
 
 ### History and audit
 
@@ -423,6 +427,13 @@ No internal NetBox code is imported directly.
 ---
 
 ## Changelog
+
+### v0.3.10
+- **Retroactive VLAN group assignment** - setting or changing a device SNMP config's
+  **VLAN group** now also re-assigns every VLAN already referenced (untagged or tagged) by
+  that device's interfaces to the new group, not just VLANs a future sync creates. Clearing
+  the VLAN group leaves existing VLANs untouched. Since VLANs aren't device-scoped in NetBox,
+  a VLAN also used by another device is updated too.
 
 ### v0.3.9
 - **SNMP Sync device tab** - the per-device SNMP Sync info moved from a right-side panel on

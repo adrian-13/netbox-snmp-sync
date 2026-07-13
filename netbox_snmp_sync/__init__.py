@@ -8,7 +8,7 @@ run history) lives natively in the NetBox UI and its background-job framework.
 """
 from netbox.plugins import PluginConfig
 
-__version__ = "0.3.9"
+__version__ = "0.3.10"
 
 
 class NetBoxSNMPSyncConfig(PluginConfig):
