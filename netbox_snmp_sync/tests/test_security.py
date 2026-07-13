@@ -199,6 +199,36 @@ class SecurityTestCase(TestCase):
         run = self.cfg.device.snmp_sync_runs.latest("created")
         self.assertIn("VLANs set 1, created 1", run.message)
 
+    def test_preview_write_uses_configured_vlan_group(self):
+        from ipam.models import VLANGroup
+
+        group = VLANGroup.objects.create(name="Customer VLANs", slug="customer-vlans")
+        self.cfg.write_vlans = True
+        self.cfg.create_vlans = True
+        self.cfg.vlan_group = group
+        self.cfg.save()
+        data = DeviceData(target="10.0.0.1", sys_name="sw1")
+        data.interfaces[1] = InterfaceData(
+            if_index=1, name="ether1", if_type=6, nb_type="1000base-t", access_vlan=30,
+        )
+        result = SimpleNamespace(
+            interfaces_created=0, interfaces_updated=0, interfaces_existing=1, interfaces_ignored=0,
+            ips_created=0, ips_existing=0, iface_vlans_set=1, vlans_created=1, devices_updated=0,
+            warnings=[], created_objects=[], changes=[],
+        )
+        c = Client()
+        c.force_login(self.admin)
+        url = reverse("plugins:netbox_snmp_sync:devicesnmpconfig_preview", args=[self.cfg.pk])
+
+        with patch("netbox_snmp_sync.views.engine.apply_sync", return_value=result) as apply_sync:
+            r = c.post(url, {
+                "snapshot": json.dumps(serialize_device_data(data)),
+                "vlan_iface": ["ether1"],
+            })
+
+        self.assertEqual(r.status_code, 302)
+        self.assertEqual(apply_sync.call_args.kwargs["vlan_group"], group)
+
     def test_preview_write_rolls_back_partial_writes_when_recording_fails(self):
         from dcim.models import Interface
 

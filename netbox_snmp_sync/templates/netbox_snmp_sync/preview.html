@@ -117,7 +117,14 @@
         </tbody>
       </table>
       {% if create_vlans_enabled %}
-        <div class="card-footer text-muted">Missing VLANs will be created in the device site.</div>
+        <div class="card-footer text-muted">
+          Missing VLANs will be created in the device site
+          {% if vlan_group %}
+            and assigned to VLAN group <strong>{{ vlan_group }}</strong>.
+          {% else %}
+            (no VLAN group set — configure one on this device's <a href="{% url 'plugins:netbox_snmp_sync:devicesnmpconfig_edit' object.pk %}">SNMP config</a>).
+          {% endif %}
+        </div>
       {% endif %}
     {% else %}
       <div class="card-body text-muted">VLAN membership writes are disabled for this device.</div>

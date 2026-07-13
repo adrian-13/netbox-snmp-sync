@@ -151,6 +151,15 @@ class DeviceSNMPConfig(NetBoxModel):
         verbose_name="Create VLANs",
         help_text="Override automatic VLAN creation for this device. Global = use global setting.",
     )
+    vlan_group = models.ForeignKey(
+        to="ipam.VLANGroup",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+        verbose_name="VLAN group",
+        help_text="Assign VLANs auto-created for this device to this group. Blank = no group.",
+    )
     vlan_subinterface_inference = models.CharField(
         max_length=10,
         blank=True,

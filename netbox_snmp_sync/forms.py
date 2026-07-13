@@ -4,6 +4,7 @@ from django.utils.html import format_html, format_html_join
 from django.utils import timezone
 
 from dcim.models import Device
+from ipam.models import VLANGroup
 from netbox.forms import NetBoxModelBulkEditForm, NetBoxModelForm, NetBoxModelImportForm
 from utilities.forms import add_blank_choice
 from utilities.forms.fields import (
@@ -128,6 +129,11 @@ class DeviceSNMPConfigForm(SyncHoursFormMixin, NetBoxModelForm):
     set_mac_address = NullableBooleanOverrideField()
     write_vlans = NullableBooleanOverrideField()
     create_vlans = NullableBooleanOverrideField()
+    vlan_group = DynamicModelChoiceField(
+        queryset=VLANGroup.objects.all(),
+        required=False,
+        help_text="Assign VLANs auto-created for this device to this group.",
+    )
     vlan_subinterface_inference = forms.ChoiceField(
         choices=VLAN_INFERENCE_OVERRIDE_CHOICES,
         required=False,
@@ -175,6 +181,7 @@ class DeviceSNMPConfigForm(SyncHoursFormMixin, NetBoxModelForm):
             "set_mac_address",
             "write_vlans",
             "create_vlans",
+            "vlan_group",
             "vlan_subinterface_inference",
             "sync_interval_hours",
             "sync_at_hours",

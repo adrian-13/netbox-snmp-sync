@@ -18,7 +18,7 @@ import re
 from dataclasses import dataclass, field
 
 from dcim.models import Interface, MACAddress
-from ipam.models import VLAN, IPAddress
+from ipam.models import VLAN, IPAddress, VLANGroup
 
 from .dto import DeviceData
 from .port_names import normalize_port_name
@@ -243,6 +243,7 @@ def apply_sync(
     sync_ip_addresses: bool = True,
     write_vlans: bool = False,
     create_vlans: bool = False,
+    vlan_group: VLANGroup | None = None,
     rename_device_to_sysname: bool = False,
     ignore_patterns: tuple[str, ...] = (),
 ) -> SyncResult:
@@ -250,7 +251,8 @@ def apply_sync(
 
     Creates missing interfaces (and their MAC/parent) and missing IPs; optionally updates
     changed fields on existing interfaces and writes per-interface VLAN membership. Never
-    deletes anything.
+    deletes anything. When ``create_vlans`` is set, any newly created VLAN is also placed in
+    ``vlan_group`` (all VLANs discovered on one device share the same group).
     """
     result = SyncResult()
     prefix = "[DRY-RUN] would " if dry_run else ""
@@ -350,7 +352,10 @@ def apply_sync(
     if sync_ip_addresses:
         _sync_ips(data, valid_iface_names, name_to_iface, result, dry_run, prefix)
     if write_vlans:
-        _sync_iface_vlans(device, data, name_to_iface, result, dry_run=dry_run, create_vlans=create_vlans, prefix=prefix)
+        _sync_iface_vlans(
+            device, data, name_to_iface, result,
+            dry_run=dry_run, create_vlans=create_vlans, vlan_group=vlan_group, prefix=prefix,
+        )
     return result
 
 
@@ -394,12 +399,14 @@ def _rename_device_to_sysname(
 
 
 def _sync_iface_vlans(device, data: DeviceData, name_to_iface: dict, result: SyncResult,
-                      *, dry_run: bool, create_vlans: bool, prefix: str):
+                      *, dry_run: bool, create_vlans: bool, vlan_group: VLANGroup | None = None,
+                      prefix: str):
     """Write per-interface VLAN membership (mode + untagged_vlan + tagged_vlans).
 
     VLANs must already exist in NetBox — unless ``create_vlans`` is set, in which case missing
-    VLANs are created in the device's site first. VID is not globally unique, so we prefer the
-    device's site and refuse to guess when a VID exists in several scopes.
+    VLANs are created in the device's site first (and placed in ``vlan_group``, if given — every
+    VLAN newly created for this device lands in the same group). VID is not globally unique, so
+    we prefer the device's site and refuse to guess when a VID exists in several scopes.
     """
     needed: set[int] = {v.vid for v in data.vlans} if create_vlans else set()
     for iface in data.interfaces.values():
@@ -438,7 +445,7 @@ def _sync_iface_vlans(device, data: DeviceData, name_to_iface: dict, result: Syn
             would_create.add(vid)
             continue
         try:
-            vlan = VLAN(vid=vid, name=vname, site=site)
+            vlan = VLAN(vid=vid, name=vname, site=site, group=vlan_group)
             vlan.save()
             vid_to_vlan[vid] = vlan
             result.vlans_created += 1

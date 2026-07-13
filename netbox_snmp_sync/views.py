@@ -12,8 +12,9 @@ from django.utils import timezone
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.generic import View
 
+from dcim.models import Device
 from netbox.views import generic
-from utilities.views import register_model_view
+from utilities.views import ViewTab, register_model_view
 
 from . import engine, filtersets, forms, tables
 from .choices import SyncModeChoices, SyncStatusChoices, SyncTriggerChoices
@@ -102,6 +103,26 @@ def _safe_referer(request):
     if ref and url_has_allowed_host_and_scheme(ref, allowed_hosts={request.get_host()}):
         return ref
     return None
+
+
+@register_model_view(Device, name="snmp_sync", path="snmp-sync")
+class DeviceSNMPSyncTabView(generic.ObjectView):
+    """Show the device's SNMP Sync configuration (or an Add button) as its own device tab."""
+
+    queryset = Device.objects.all()
+    template_name = "netbox_snmp_sync/device_snmp_tab.html"
+    tab = ViewTab(
+        label="SNMP Sync",
+        badge=lambda obj: SyncRun.objects.filter(device=obj).count() or None,
+        permission="netbox_snmp_sync.view_devicesnmpconfig",
+    )
+
+    def get_extra_context(self, request, instance):
+        last_sync = SyncRun.objects.filter(device=instance).order_by("-created").first()
+        return {
+            "snmp_config": getattr(instance, "snmp_config", None),
+            "last_sync": last_sync,
+        }
 
 
 @register_model_view(DeviceSNMPConfig, name="list", path="", detail=False)
@@ -412,6 +433,7 @@ class DeviceSNMPConfigPreviewView(LoginRequiredMixin, View):
             "sync_ip_addresses_enabled": behaviour["sync_ip_addresses"],
             "write_vlans_enabled": behaviour["write_vlans"],
             "create_vlans_enabled": behaviour["create_vlans"],
+            "vlan_group": config.vlan_group,
             "snapshot": json.dumps(serialize_device_data(data)),
         })
 
@@ -432,6 +454,7 @@ class DeviceSNMPConfigPreviewView(LoginRequiredMixin, View):
         write_vlans = behaviour["write_vlans"]
         create_vlans = behaviour["create_vlans"]
         selected_vlan_ifaces = set(request.POST.getlist("vlan_iface")) if write_vlans else set()
+        vlan_group = config.vlan_group if create_vlans else None
         selected_ip_ifindexes = {
             ip.if_index for ip in data.ip_addresses
             if ip.address in selected_ips
@@ -457,6 +480,7 @@ class DeviceSNMPConfigPreviewView(LoginRequiredMixin, View):
                 sync_ip_addresses=behaviour["sync_ip_addresses"],
                 write_vlans=write_vlans,
                 create_vlans=create_vlans,
+                vlan_group=vlan_group,
                 rename_device_to_sysname=bool(config.rename_device_to_sysname),
             )
             message = (

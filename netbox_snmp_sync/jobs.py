@@ -133,6 +133,7 @@ def _sync_one(config, *, mode, trigger, logger=None, user=None, reset_schedule=F
                     sync_ip_addresses=behaviour["sync_ip_addresses"],
                     write_vlans=behaviour["write_vlans"],
                     create_vlans=behaviour["create_vlans"],
+                    vlan_group=config.vlan_group,
                     rename_device_to_sysname=bool(config.rename_device_to_sysname),
                 )
             verb = "would create" if mode == SyncModeChoices.DRY_RUN else "created"

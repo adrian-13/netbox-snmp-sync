@@ -8,7 +8,7 @@ from django.utils import timezone
 
 from core.models import Job
 from dcim.models import Device, DeviceRole, DeviceType, Interface, Manufacturer, Site
-from ipam.models import VLAN, IPAddress
+from ipam.models import VLAN, IPAddress, VLANGroup
 
 from netbox_snmp_sync import engine, views
 from netbox_snmp_sync.dto import DeviceData, InterfaceData, IPAddressData, VlanData
@@ -270,6 +270,26 @@ class EngineTestCase(TestCase):
         self.assertTrue(VLAN.objects.filter(vid=30, name="mgmt", site=self.device.site).exists())
         eth1 = Interface.objects.get(device=self.device, name="ether1")
         self.assertEqual(eth1.untagged_vlan.site, self.device.site)
+
+    def test_create_missing_vlans_assigns_chosen_group(self):
+        group = VLANGroup.objects.create(name="Customer VLANs", slug="customer-vlans")
+        data = DeviceData(target="x", sys_name="sw1")
+        data.vlans.append(VlanData(vid=30, name="mgmt"))
+        data.vlans.append(VlanData(vid=40, name="guest"))
+        data.interfaces[1] = InterfaceData(
+            if_index=1, name="ether1", if_type=6, enabled=True, nb_type="1000base-t", access_vlan=30,
+        )
+        data.interfaces[2] = InterfaceData(
+            if_index=2, name="ether2", if_type=6, enabled=True, nb_type="1000base-t", tagged_vlans=[40],
+        )
+
+        result = engine.apply_sync(
+            self.device, data, dry_run=False, write_vlans=True, create_vlans=True, vlan_group=group,
+        )
+
+        self.assertEqual(result.vlans_created, 2)
+        self.assertTrue(VLAN.objects.filter(vid=30, site=self.device.site, group=group).exists())
+        self.assertTrue(VLAN.objects.filter(vid=40, site=self.device.site, group=group).exists())
 
     def test_subinterface_vlan_write_uses_collected_vlan_not_name_suffix(self):
         data = DeviceData(target="x", sys_name="sw1", vendor="Cisco")
