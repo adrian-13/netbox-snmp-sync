@@ -62,8 +62,8 @@ workflow lives in NetBox's UI and background-job framework.
 
 ### Per-device SNMP settings
 
-Each device gets its own SNMP configuration, accessible from the device detail page
-(right-side panel) or from **SNMP Sync → Device SNMP Configs**:
+Each device gets its own SNMP configuration, accessible from the device detail page's
+**SNMP Sync** tab or from **SNMP Sync → Device SNMP Configs**:
 
 | Field | Description |
 |-------|-------------|
@@ -101,7 +101,9 @@ writes, automatic VLAN creation, and whether VLAN IDs may be inferred from sub-i
 names like `parent.30`. When rename is enabled, apply syncs rename the NetBox device to
 the collected SNMP `sysName`; read-only tests and compare runs do not rename devices.
 Preview shows the collected `sysName` before writing, and successful renames are recorded
-in the sync run message and change log.
+in the sync run message and change log. When automatic VLAN creation is on, set a
+**VLAN group** on the device's SNMP config to place every VLAN auto-created for that device
+(from Preview & write or a scheduled sync) into that group; leave it blank for no group.
 
 ### History and audit
 
@@ -183,7 +185,7 @@ python manage.py showmigrations netbox_snmp_sync
 ```
 
 The **SNMP Sync** menu should now appear in the NetBox navigation bar, and every device
-detail page should show an **SNMP Sync** panel on the right side.
+detail page should show an **SNMP Sync** tab.
 
 ### Development with netbox-docker
 
@@ -245,7 +247,7 @@ PLUGINS_CONFIG = {
 
 ### 1 — Add an SNMP configuration to a device
 
-Open **Devices → \<device\> → SNMP Sync panel → Add**, or go to
+Open **Devices → \<device\> → SNMP Sync tab → Add**, or go to
 **SNMP Sync → Device SNMP Configs → Add** and select the device.
 
 Fill in the SNMP version and credentials. The poll target defaults to the device's primary
@@ -254,13 +256,13 @@ IP; set **Target override** if you need to poll a management address instead.
 ### 2 — Test connectivity
 
 Click the **Test SNMP** button (the cyan icon next to the pencil in the list, or the button
-in the device panel). A result page is rendered immediately:
+on the device's SNMP Sync tab). A result page is rendered immediately:
 
 - ✅ **OK** — shows the sysName returned by the device
 - ❌ **Failed** — shows the exact error (unreachable, wrong community, timeout, …)
 
-The result is saved to the **Last test** column in the list and to the device panel, so you
-can see at a glance which devices are reachable.
+The result is saved to the **Last test** column in the list and to the device's SNMP Sync
+tab, so you can see at a glance which devices are reachable.
 
 To test multiple devices at once: check them in the list → click **Test selected** at the
 bottom. Results are shown in a single table.
@@ -305,7 +307,7 @@ restart or manual step needed. Each device gets its own isolated RQ job, so a sl
 unreachable device does not block the others. If a device already has a pending or running
 SNMP sync job, the scheduler reuses it instead of queuing a duplicate. Failed scheduled syncs
 use a simple exponential retry delay (1 h, 2 h, 4 h, up to 24 h) before trying again. The
-device list and detail panel show **Retry** / **Retry due** with the failure count and last
+device list and detail tab show **Retry** / **Retry due** with the failure count and last
 error message.
 
 Background sync jobs also have a configurable SNMP collection timeout. Set
@@ -422,6 +424,19 @@ No internal NetBox code is imported directly.
 
 ## Changelog
 
+### v0.3.9
+- **SNMP Sync device tab** - the per-device SNMP Sync info moved from a right-side panel on
+  the device page into its own **SNMP Sync** tab (badge shows the sync run count), alongside
+  Interfaces, IP Addresses, etc.
+- **VLAN group assignment** - device SNMP configs can now set a target **VLAN group**; VLANs
+  auto-created for that device — via Preview & write or a scheduled/background sync — are
+  placed in that group.
+- **Missed schedule recovery** - after long scheduler downtime, an overdue schedule older than
+  a configurable grace window (`sync_missed_schedule_grace_minutes`) is re-anchored instead of
+  queued as a catch-up sync, avoiding a stampede of syncs for every device at once.
+- **Bulk schedule recalculation** - added a bulk action to recompute the next scheduled sync
+  time for selected device SNMP configurations.
+
 ### v0.3.8
 - **Per-device sync behaviour** - device SNMP configs can now inherit or override
   interface sync, IP sync, existing-interface updates, MAC writes, VLAN writes, and
@@ -497,7 +512,7 @@ No internal NetBox code is imported directly.
 ### v0.2.0
 - **Test SNMP result page** — full OK/Failed page instead of a toast message that was
   silently swallowed by the browser; last test time, status badge, and message are
-  persisted and shown in the list column and device panel
+  persisted and shown in the list column and device tab
 - **Bulk SNMP test** — select multiple configs → *Test selected* → concurrent probes
   (thread pool of 8), combined result page
 - **Global settings in UI** — `SNMPSyncConfig` singleton editable at SNMP Sync → Settings
