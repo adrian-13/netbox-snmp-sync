@@ -152,7 +152,9 @@ class EngineTestCase(TestCase):
             for change in result.changes
         ))
 
-    def test_apply_reassigns_mac_from_interface_on_same_device(self):
+    def test_apply_gives_sibling_interface_its_own_mac_row_instead_of_stealing(self):
+        # Sub-interfaces routinely report their parent port's MAC over SNMP — a shared MAC
+        # string across sibling interfaces is normal, not a conflict to resolve by theft.
         other = Interface.objects.create(device=self.device, name="old-ether1", type="1000base-t", enabled=True)
         mac = MACAddress.objects.create(mac_address="AA:BB:CC:DD:EE:01", assigned_object=other)
         other.primary_mac_address = mac
@@ -162,12 +164,27 @@ class EngineTestCase(TestCase):
 
         other.refresh_from_db()
         eth1 = Interface.objects.get(device=self.device, name="ether1")
-        self.assertIsNone(other.primary_mac_address_id)
+        self.assertEqual(other.primary_mac_address_id, mac.pk)  # sibling keeps its own MAC
         self.assertIsNotNone(eth1.primary_mac_address)
         self.assertEqual(str(eth1.primary_mac_address.mac_address), "AA:BB:CC:DD:EE:01")
+        self.assertNotEqual(eth1.primary_mac_address_id, mac.pk)  # but a distinct row of its own
         self.assertEqual(result.warnings, [])
 
-    def test_apply_does_not_steal_mac_from_interface_on_different_device(self):
+    def test_apply_mac_assignment_is_stable_across_repeated_syncs(self):
+        # Regression: with N sibling interfaces sharing one MAC string, the diff must settle
+        # after the first sync instead of reshuffling primary_mac_address every run.
+        engine.apply_sync(self.device, _device_data(), dry_run=False)
+        eth1 = Interface.objects.get(device=self.device, name="ether1")
+        first_mac_id = eth1.primary_mac_address_id
+        self.assertIsNotNone(first_mac_id)
+
+        result = engine.apply_sync(self.device, _device_data(), dry_run=False)
+
+        eth1.refresh_from_db()
+        self.assertEqual(eth1.primary_mac_address_id, first_mac_id)
+        self.assertFalse(any(c.field == "primary_mac_address" for c in result.changes))
+
+    def test_apply_does_not_touch_mac_on_interface_on_different_device(self):
         other_site = Site.objects.create(name="Other", slug="other-mac-test")
         other_device = Device.objects.create(
             name="other-device", device_type=self.device.device_type,
@@ -183,10 +200,9 @@ class EngineTestCase(TestCase):
         other_iface.refresh_from_db()
         eth1 = Interface.objects.get(device=self.device, name="ether1")
         self.assertEqual(other_iface.primary_mac_address_id, mac.pk)
-        self.assertIsNone(eth1.primary_mac_address_id)
-        # Both devices happen to name this interface "ether1" — the warning must disambiguate
-        # by device, or it's useless for figuring out which one actually holds the MAC.
-        self.assertTrue(any("already assigned" in w and "other-device" in w for w in result.warnings))
+        self.assertIsNotNone(eth1.primary_mac_address_id)
+        self.assertNotEqual(eth1.primary_mac_address_id, mac.pk)
+        self.assertEqual(result.warnings, [])
 
     def test_apply_assigns_existing_unassigned_ip_to_interface(self):
         iface = Interface.objects.create(device=self.device, name="ether1", type="1000base-t", enabled=True)
@@ -262,6 +278,50 @@ class EngineTestCase(TestCase):
         bridge = Interface.objects.get(device=self.device, name="bridge")
         self.assertEqual(bridge.mode, "tagged")
         self.assertEqual(sorted(bridge.tagged_vlans.values_list("vid", flat=True)), [10, 20])
+
+    def test_vlan_name_updated_when_update_existing_enabled(self):
+        VLAN.objects.create(vid=10, name="old-name", site=self.device.site)
+        data = DeviceData(target="x", sys_name="sw1")
+        data.vlans.append(VlanData(vid=10, name="new-name"))
+        data.interfaces[1] = InterfaceData(
+            if_index=1, name="ether1", if_type=6, enabled=True, nb_type="1000base-t", access_vlan=10,
+        )
+
+        result = engine.apply_sync(self.device, data, dry_run=False, write_vlans=True, update_existing=True)
+
+        vlan = VLAN.objects.get(vid=10, site=self.device.site)
+        self.assertEqual(vlan.name, "new-name")
+        self.assertTrue(any(
+            change.object_type == "vlan" and change.field == "name"
+            and change.old_value == "old-name" and change.new_value == "new-name"
+            for change in result.changes
+        ))
+
+    def test_vlan_name_not_updated_without_update_existing(self):
+        VLAN.objects.create(vid=10, name="old-name", site=self.device.site)
+        data = DeviceData(target="x", sys_name="sw1")
+        data.vlans.append(VlanData(vid=10, name="new-name"))
+        data.interfaces[1] = InterfaceData(
+            if_index=1, name="ether1", if_type=6, enabled=True, nb_type="1000base-t", access_vlan=10,
+        )
+
+        engine.apply_sync(self.device, data, dry_run=False, write_vlans=True, update_existing=False)
+
+        vlan = VLAN.objects.get(vid=10, site=self.device.site)
+        self.assertEqual(vlan.name, "old-name")
+
+    def test_vlan_name_update_still_matches_by_vid_not_name(self):
+        # VLANs are matched by VID (already stable), so a rename must never create a duplicate.
+        VLAN.objects.create(vid=10, name="old-name", site=self.device.site)
+        data = DeviceData(target="x", sys_name="sw1")
+        data.vlans.append(VlanData(vid=10, name="new-name"))
+        data.interfaces[1] = InterfaceData(
+            if_index=1, name="ether1", if_type=6, enabled=True, nb_type="1000base-t", access_vlan=10,
+        )
+
+        engine.apply_sync(self.device, data, dry_run=False, write_vlans=True, update_existing=True)
+
+        self.assertEqual(VLAN.objects.filter(vid=10, site=self.device.site).count(), 1)
 
     def test_revert_run_deletes_created_objects(self):
         from netbox_snmp_sync.models import SyncRun, record_created_objects

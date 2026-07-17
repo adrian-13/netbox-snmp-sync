@@ -429,6 +429,19 @@ No internal NetBox code is imported directly.
 
 ## Changelog
 
+### v0.3.13
+- **Fixed MAC address sync never settling on devices with shared MACs** - the same-device MAC
+  reassignment added in v0.3.11 assumed a MAC already held by another interface always meant
+  "this port was renamed," but VLAN sub-interfaces routinely and correctly report their parent
+  port's MAC over SNMP. On a device with many sub-interfaces sharing one MAC, every sync run
+  reshuffled that MAC onto whichever interface synced last, so the pending change never went
+  away no matter how many times it was written. Each interface now gets its own MAC address
+  record instead of fighting siblings over a shared one.
+- **VLAN names stay in sync** - when "Update existing objects" is enabled, a VLAN's name in
+  NetBox is now refreshed if it no longer matches what SNMP reports for that VLAN ID. VLANs
+  are already matched by VID (a stable identifier), so this never creates a duplicate - only
+  the label was going stale before.
+
 ### v0.3.12
 - **Menu items respect permissions** - "Device SNMP Configs", "Sync Runs", "Settings" and
   the "Add" button now check the relevant `view_*`/`add_*`/`change_*` permission before

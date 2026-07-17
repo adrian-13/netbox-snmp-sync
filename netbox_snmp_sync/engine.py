@@ -215,36 +215,22 @@ def compare_device(
 def _assign_mac(iface: Interface, mac: str) -> tuple[bool, str | None]:
     """NetBox >= 4.2: create a MACAddress object and set it as the interface's primary MAC.
 
-    If ``mac`` already belongs to a different interface on the SAME device, it is reassigned
-    here — common for virtual interfaces (e.g. a bridge) that report a physical port's MAC over
-    SNMP. If it belongs to something on a different device, the assignment is skipped instead —
-    that's more likely a real data problem (duplicate/misconfigured device) than a benign quirk,
-    so it isn't touched automatically. Returns ``(success, warning_or_None)``.
+    Looked up and, if needed, created scoped to ``iface`` itself — never reused from another
+    interface. ``MACAddress.mac_address`` isn't globally unique in NetBox, and VLAN
+    sub-interfaces routinely report their parent port's MAC over SNMP, so it's normal for many
+    interfaces on a device to legitimately share the same address string (a device with lots of
+    sub-interfaces can have a hundred-plus of them tied to one physical port's MAC). Reusing a
+    single MACAddress row across interfaces meant whichever interface synced last "stole" it from
+    every sibling that shared it, so the diff never settled — each sync just moved the same row
+    to a different interface. Returns ``(success, warning_or_None)``.
     """
     try:
-        mac_obj = MACAddress.objects.filter(mac_address=mac).first()
+        mac_obj = iface.mac_addresses.filter(mac_address=mac).first()
         if mac_obj is None:
             mac_obj = MACAddress.objects.create(mac_address=mac, assigned_object=iface)
-        elif getattr(mac_obj, "assigned_object", None) is None:
-            mac_obj.assigned_object = iface
-            mac_obj.save()
-        elif mac_obj.assigned_object != iface:
-            current = mac_obj.assigned_object
-            same_device = isinstance(current, Interface) and current.device_id == iface.device_id
-            current_desc = f"{current.device} / {current.name}" if isinstance(current, Interface) else str(current)
-            if not same_device:
-                log.warning("interface %s: MAC %s is already assigned to %s", iface.name, mac, current_desc)
-                return False, f"{iface.name}: MAC {mac} is already assigned to {current_desc} — skipped"
-            log.info("interface %s: reassigning MAC %s from %s (same device)", iface.name, mac, current_desc)
-            # Interface.primary_mac_address is unique — clear the old holder first, or
-            # pointing the new interface at the same MACAddress row violates that constraint.
-            if isinstance(current, Interface) and current.primary_mac_address_id == mac_obj.pk:
-                current.primary_mac_address = None
-                current.save(update_fields=["primary_mac_address"])
-            mac_obj.assigned_object = iface
-            mac_obj.save()
-        iface.primary_mac_address = mac_obj
-        iface.save()
+        if iface.primary_mac_address_id != mac_obj.pk:
+            iface.primary_mac_address = mac_obj
+            iface.save()
         return True, None
     except Exception as exc:  # noqa: BLE001
         log.warning("interface %s: could not set MAC %s: %s", iface.name, mac, exc)
@@ -380,6 +366,7 @@ def apply_sync(
         _sync_iface_vlans(
             device, data, name_to_iface, result,
             dry_run=dry_run, create_vlans=create_vlans, vlan_group=vlan_group, prefix=prefix,
+            update_existing=update_existing,
         )
     return result
 
@@ -425,13 +412,18 @@ def _rename_device_to_sysname(
 
 def _sync_iface_vlans(device, data: DeviceData, name_to_iface: dict, result: SyncResult,
                       *, dry_run: bool, create_vlans: bool, vlan_group: VLANGroup | None = None,
-                      prefix: str):
+                      prefix: str, update_existing: bool = False):
     """Write per-interface VLAN membership (mode + untagged_vlan + tagged_vlans).
 
     VLANs must already exist in NetBox — unless ``create_vlans`` is set, in which case missing
     VLANs are created in the device's site first (and placed in ``vlan_group``, if given — every
     VLAN newly created for this device lands in the same group). VID is not globally unique, so
     we prefer the device's site and refuse to guess when a VID exists in several scopes.
+
+    VLANs are matched by VID (already a stable identifier), so a renamed VLAN never creates a
+    duplicate — but its NetBox ``name`` still needs to be refreshed to match. That refresh is
+    gated behind ``update_existing``, same as interface description/type/speed updates, since
+    it's a label update rather than a correctness fix.
     """
     needed: set[int] = {v.vid for v in data.vlans} if create_vlans else set()
     for iface in data.interfaces.values():
@@ -486,6 +478,29 @@ def _sync_iface_vlans(device, data: DeviceData, name_to_iface: dict, result: Syn
             log.info("%screated VLAN %s (%s)", prefix, vid, vname)
         except Exception as exc:  # noqa: BLE001
             result.warnings.append(f"VLAN {vid} ({vname}): create failed: {exc}")
+
+    if update_existing:
+        for vid, vlan in vid_to_vlan.items():
+            new_name = vlan_names.get(vid)
+            if not new_name or vlan.name == new_name:
+                continue
+            old_name = vlan.name
+            log.info("%srename VLAN %s: %s -> %s", prefix, vid, old_name, new_name)
+            result.changes.append(SyncChange(
+                action="updated",
+                object_type="vlan",
+                object_repr=f"VLAN {vid}",
+                field="name",
+                old_value=old_name,
+                new_value=new_name,
+            ))
+            if dry_run:
+                continue
+            try:
+                vlan.name = new_name
+                vlan.save(update_fields=["name"])
+            except Exception as exc:  # noqa: BLE001
+                result.warnings.append(f"VLAN {vid}: rename failed: {exc}")
 
     for iface in data.interfaces.values():
         if not iface.access_vlan and not iface.tagged_vlans:
