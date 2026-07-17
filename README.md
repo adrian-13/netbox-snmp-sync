@@ -429,6 +429,22 @@ No internal NetBox code is imported directly.
 
 ## Changelog
 
+### v0.3.12
+- **Menu items respect permissions** - "Device SNMP Configs", "Sync Runs", "Settings" and
+  the "Add" button now check the relevant `view_*`/`add_*`/`change_*` permission before
+  showing in the navigation menu, instead of always appearing regardless of access.
+- **Bulk setup page requires add permission on GET** - previously only the POST (submit)
+  handler checked `add_devicesnmpconfig`; a logged-in user without that permission could
+  still open the form itself via direct URL.
+- **Action buttons hidden without change permission** - Test SNMP, Sync & schedule, Edit,
+  Recalculate and Clear stuck sync no longer render for users who can view but not change a
+  device's SNMP config (they were already blocked server-side; now they're not shown as an
+  option in the first place). Read-only actions like Preview & write remain visible.
+- **SNMP community string no longer rendered in the UI** - it showed up in plaintext in the
+  Device SNMP Configs list (a default-visible column, no extra click needed), the device tab,
+  and the config detail page. All three now show only whether a community string is
+  configured, matching how SNMPv3 auth/priv keys are already kept out of templates.
+
 ### v0.3.11
 - **Device type / manufacturer / site on SNMP views** - the SNMP Sync panel now shows the
   device's Manufacturer and Device Type, and the Device SNMP Configs list gained Site and

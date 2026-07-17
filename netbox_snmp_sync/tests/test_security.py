@@ -60,6 +60,11 @@ class SecurityTestCase(TestCase):
         change_permission = ObjectPermission.objects.create(name="Can change SNMP configs", actions=["change"])
         change_permission.object_types.add(content_type)
         change_permission.users.add(cls.operator)
+        # The device tab is a Device-model view (dcim.view_device), separate from the
+        # netbox_snmp_sync permissions above — needed to reach the tab at all.
+        device_view_permission = ObjectPermission.objects.create(name="Can view devices", actions=["view"])
+        device_view_permission.object_types.add(ContentType.objects.get_for_model(Device))
+        device_view_permission.users.add(cls.viewer, cls.operator)
 
     # --- REST API ---
 
@@ -678,3 +683,89 @@ class SecurityTestCase(TestCase):
         body = r.content.decode()
         self.assertNotIn(SECRET_AUTH, body, "SNMPv3 auth key must never render in the UI")
         self.assertNotIn(SECRET_PRIV, body, "SNMPv3 priv key must never render in the UI")
+        self.assertNotIn(SECRET_COMM, body, "SNMP community string must never render in the UI")
+
+    def test_community_not_in_device_tab(self):
+        c = Client()
+        c.force_login(self.admin)
+        url = reverse("dcim:device_snmp_sync", args=[self.device.pk])
+        r = c.get(url)
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn(SECRET_COMM, r.content.decode())
+
+    def test_community_not_in_config_list(self):
+        c = Client()
+        c.force_login(self.admin)
+        r = c.get(reverse("plugins:netbox_snmp_sync:devicesnmpconfig_list"))
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn(SECRET_COMM, r.content.decode())
+
+    # --- Action buttons must not render for users who can view but not change ---
+
+    def test_device_tab_hides_change_actions_from_viewer(self):
+        c = Client()
+        c.force_login(self.viewer)
+        url = reverse("dcim:device_snmp_sync", args=[self.device.pk])
+
+        r = c.get(url)
+
+        self.assertEqual(r.status_code, 200)
+        body = r.content.decode()
+        self.assertNotIn("Test SNMP", body)
+        self.assertNotIn("Sync &amp; schedule", body)
+        self.assertNotIn(f"/device-snmp-configs/{self.cfg.pk}/edit/", body)
+        # Read-only actions stay visible — a viewer can still see the diff.
+        self.assertIn("Preview &amp; write", body)
+
+    def test_device_tab_shows_change_actions_for_operator(self):
+        c = Client()
+        c.force_login(self.operator)
+        url = reverse("dcim:device_snmp_sync", args=[self.device.pk])
+
+        r = c.get(url)
+
+        self.assertEqual(r.status_code, 200)
+        body = r.content.decode()
+        self.assertIn("Test SNMP", body)
+        self.assertIn("Sync &amp; schedule", body)
+        self.assertIn(f"/device-snmp-configs/{self.cfg.pk}/edit/", body)
+
+    def test_detail_page_hides_change_actions_from_viewer(self):
+        c = Client()
+        c.force_login(self.viewer)
+
+        r = c.get(self.cfg.get_absolute_url())
+
+        self.assertEqual(r.status_code, 200)
+        body = r.content.decode()
+        self.assertNotIn("Recalculate", body)
+        self.assertNotIn("Sync &amp; schedule", body)
+
+    def test_detail_page_shows_change_actions_for_operator(self):
+        c = Client()
+        c.force_login(self.operator)
+
+        r = c.get(self.cfg.get_absolute_url())
+
+        self.assertEqual(r.status_code, 200)
+        body = r.content.decode()
+        self.assertIn("Recalculate", body)
+        self.assertIn("Sync &amp; schedule", body)
+
+    def test_bulk_setup_get_requires_add_permission(self):
+        c = Client()
+        c.force_login(self.viewer)
+        url = reverse("plugins:netbox_snmp_sync:bulk_setup")
+
+        r = c.get(url)
+
+        self.assertEqual(r.status_code, 302)
+
+    def test_bulk_setup_get_allows_admin(self):
+        c = Client()
+        c.force_login(self.admin)
+        url = reverse("plugins:netbox_snmp_sync:bulk_setup")
+
+        r = c.get(url)
+
+        self.assertEqual(r.status_code, 200)

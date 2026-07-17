@@ -122,6 +122,8 @@ class DeviceSNMPSyncTabView(generic.ObjectView):
         return {
             "snmp_config": getattr(instance, "snmp_config", None),
             "last_sync": last_sync,
+            "can_change_config": request.user.has_perm("netbox_snmp_sync.change_devicesnmpconfig"),
+            "can_add_config": request.user.has_perm("netbox_snmp_sync.add_devicesnmpconfig"),
         }
 
 
@@ -142,6 +144,11 @@ class DeviceSNMPConfigListView(generic.ObjectListView):
 @register_model_view(DeviceSNMPConfig)
 class DeviceSNMPConfigView(generic.ObjectView):
     queryset = DeviceSNMPConfig.objects.all()
+
+    def get_extra_context(self, request, instance):
+        return {
+            "can_change_config": request.user.has_perm("netbox_snmp_sync.change_devicesnmpconfig"),
+        }
 
 
 @register_model_view(DeviceSNMPConfig, name="add", detail=False)
@@ -613,6 +620,10 @@ class BulkSNMPConfigView(LoginRequiredMixin, View):
     template_name = "netbox_snmp_sync/bulk_setup.html"
 
     def get(self, request):
+        # Direct URL access must follow the same add permission as the POST handler.
+        if not request.user.has_perm("netbox_snmp_sync.add_devicesnmpconfig"):
+            messages.error(request, "You do not have permission to create SNMP configurations.")
+            return redirect("plugins:netbox_snmp_sync:devicesnmpconfig_list")
         return render(request, self.template_name, {"form": forms.BulkSNMPConfigForm()})
 
     def post(self, request):

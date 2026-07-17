@@ -11,22 +11,26 @@ menu = PluginMenu(
                 PluginMenuItem(
                     link="plugins:netbox_snmp_sync:devicesnmpconfig_list",
                     link_text="Device SNMP Configs",
+                    permissions=("netbox_snmp_sync.view_devicesnmpconfig",),
                     buttons=(
                         PluginMenuButton(
                             link="plugins:netbox_snmp_sync:devicesnmpconfig_add",
                             title="Add",
                             icon_class="mdi mdi-plus-thick",
                             color=ButtonColorChoices.GREEN,
+                            permissions=("netbox_snmp_sync.add_devicesnmpconfig",),
                         ),
                     ),
                 ),
                 PluginMenuItem(
                     link="plugins:netbox_snmp_sync:syncrun_list",
                     link_text="Sync Runs",
+                    permissions=("netbox_snmp_sync.view_syncrun",),
                 ),
                 PluginMenuItem(
                     link="plugins:netbox_snmp_sync:settings",
                     link_text="Settings",
+                    permissions=("netbox_snmp_sync.change_snmpsyncconfig",),
                 ),
                 # 'Bulk setup' is intentionally not in the menu (reachable by direct URL:
                 # /plugins/snmp-sync/bulk-setup/). Use Device SNMP Configs → Import for bulk create.

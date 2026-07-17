@@ -27,6 +27,10 @@ NEXT_SYNC_COL = """{% if not record.enabled %}<span class="text-muted">disabled<
 
 SCHEDULE_COL = """<span class="badge text-bg-{{ record.schedule_color }}">{{ record.schedule_label }}</span>"""
 
+# The community string is an SNMPv1/v2c credential — never render its actual value in the UI,
+# only whether one is set (matches how SNMPv3 auth/priv keys are already kept out of templates).
+COMMUNITY_COL = """{% if record.community %}<span class="text-success">configured</span>{% else %}<span class="text-muted">not configured</span>{% endif %}"""
+
 BEHAVIOUR_COL = """<span title="Interfaces">{{ record.sync_interfaces_label }}</span> / <span title="IP addresses">{{ record.sync_ip_addresses_label }}</span> / <span title="VLAN writes">{{ record.write_vlans_label }}</span>"""
 
 
@@ -36,6 +40,7 @@ class DeviceSNMPConfigTable(NetBoxTable):
     device_type = tables.Column(accessor="device__device_type", linkify=True, verbose_name="Device Type")
     enabled = columns.BooleanColumn()
     snmp_version = columns.ChoiceFieldColumn()
+    community = tables.TemplateColumn(template_code=COMMUNITY_COL, orderable=False)
     last_sync = tables.TemplateColumn(
         template_code=LAST_SYNC_COL, verbose_name="Last sync", order_by=("last_sync_at",),
     )

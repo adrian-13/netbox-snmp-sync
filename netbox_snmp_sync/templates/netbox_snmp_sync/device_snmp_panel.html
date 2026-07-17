@@ -4,15 +4,18 @@
     SNMP Sync
     {% if snmp_config %}
     <div class="card-actions">
+      {% if can_change_config %}
       <form method="post" action="{% url 'plugins:netbox_snmp_sync:devicesnmpconfig_test' pk=snmp_config.pk %}" class="d-inline">
         {% csrf_token %}
         <button type="submit" class="btn btn-sm btn-cyan">
           <i class="mdi mdi-access-point-check"></i> Test SNMP
         </button>
       </form>
+      {% endif %}
       <a href="{% url 'plugins:netbox_snmp_sync:devicesnmpconfig_preview' pk=snmp_config.pk %}" class="btn btn-sm btn-success">
         <i class="mdi mdi-magnify-scan"></i> Preview &amp; write
       </a>
+      {% if can_change_config %}
       <form method="post" action="{% url 'plugins:netbox_snmp_sync:devicesnmpconfig_sync' pk=snmp_config.pk %}" class="d-inline">
         {% csrf_token %}
         <input type="hidden" name="mode" value="apply">
@@ -21,12 +24,15 @@
           <i class="mdi mdi-calendar-sync"></i> Sync &amp; schedule
         </button>
       </form>
+      {% endif %}
       <a href="{% url 'plugins:netbox_snmp_sync:devicesnmpconfig' pk=snmp_config.pk %}" class="btn btn-sm btn-primary">
         <i class="mdi mdi-eye"></i> View
       </a>
+      {% if can_change_config %}
       <a href="{% url 'plugins:netbox_snmp_sync:devicesnmpconfig_edit' pk=snmp_config.pk %}" class="btn btn-sm btn-warning">
         <i class="mdi mdi-pencil"></i> Edit
       </a>
+      {% endif %}
     </div>
     {% endif %}
   </h2>
@@ -37,7 +43,7 @@
     <tr><th scope="row">Enabled</th><td>{{ snmp_config.enabled|yesno:"Yes,No" }}</td></tr>
     <tr><th scope="row">Version</th><td>{{ snmp_config.get_snmp_version_display }}</td></tr>
     <tr><th scope="row">Port</th><td>{{ snmp_config.port }}</td></tr>
-    <tr><th scope="row">Community</th><td>{{ snmp_config.community|placeholder }}</td></tr>
+    <tr><th scope="row">Community</th><td>{{ snmp_config.community|yesno:"configured,not configured" }}</td></tr>
     <tr><th scope="row">Target</th><td>{{ snmp_config.target|placeholder }}</td></tr>
     <tr><th scope="row">Rename to sysName</th><td>{{ snmp_config.rename_device_to_sysname|yesno:"Yes,No" }}</td></tr>
     <tr><th scope="row">Interfaces</th><td>{{ snmp_config.sync_interfaces_label }}</td></tr>
@@ -95,9 +101,11 @@
   {% else %}
   <div class="card-body">
     <span class="text-muted">No SNMP configuration.</span>
+    {% if can_add_config %}
     <a href="{% url 'plugins:netbox_snmp_sync:devicesnmpconfig_add' %}?device={{ object.pk }}" class="btn btn-sm btn-primary float-end">
       <i class="mdi mdi-plus-thick"></i> Add
     </a>
+    {% endif %}
   </div>
   {% endif %}
 </div>
