@@ -32,13 +32,24 @@ BEHAVIOUR_COL = """<span title="Interfaces">{{ record.sync_interfaces_label }}</
 
 class DeviceSNMPConfigTable(NetBoxTable):
     device = tables.Column(linkify=True)
+    site = tables.Column(accessor="device__site", linkify=True, verbose_name="Site")
+    device_type = tables.Column(accessor="device__device_type", linkify=True, verbose_name="Device Type")
     enabled = columns.BooleanColumn()
     snmp_version = columns.ChoiceFieldColumn()
-    last_sync = tables.TemplateColumn(template_code=LAST_SYNC_COL, verbose_name="Last sync", orderable=False)
-    schedule = tables.TemplateColumn(template_code=SCHEDULE_COL, verbose_name="Schedule", orderable=False)
+    last_sync = tables.TemplateColumn(
+        template_code=LAST_SYNC_COL, verbose_name="Last sync", order_by=("last_sync_at",),
+    )
+    schedule = tables.TemplateColumn(
+        template_code=SCHEDULE_COL, verbose_name="Schedule", order_by=("schedule_sort",),
+    )
     behaviour = tables.TemplateColumn(template_code=BEHAVIOUR_COL, verbose_name="Sync", orderable=False)
-    sync_state = tables.TemplateColumn(template_code=SYNC_STATE_COL, verbose_name="Sync state", orderable=False)
-    next_sync = tables.TemplateColumn(template_code=NEXT_SYNC_COL, verbose_name="Next sync", orderable=False)
+    sync_state = tables.TemplateColumn(
+        template_code=SYNC_STATE_COL, verbose_name="Sync state", order_by=("sync_state_sort",),
+    )
+    next_sync = tables.TemplateColumn(
+        template_code=NEXT_SYNC_COL, verbose_name="Next sync", order_by=("next_sync_at",),
+    )
+    tags = columns.TagColumn(url_name="plugins:netbox_snmp_sync:devicesnmpconfig_list")
     actions = columns.ActionsColumn(extra_buttons=SNMP_TEST_BUTTON)
 
     class Meta(NetBoxTable.Meta):
@@ -47,6 +58,8 @@ class DeviceSNMPConfigTable(NetBoxTable):
             "pk",
             "id",
             "device",
+            "site",
+            "device_type",
             "enabled",
             "snmp_version",
             "port",
@@ -58,11 +71,12 @@ class DeviceSNMPConfigTable(NetBoxTable):
             "last_sync",
             "sync_state",
             "next_sync",
+            "tags",
             "created",
             "last_updated",
         )
         default_columns = (
-            "device", "enabled", "snmp_version", "port", "community",
+            "device", "site", "device_type", "enabled", "snmp_version", "port", "community",
             "behaviour", "schedule", "last_sync", "sync_state", "next_sync",
         )
 

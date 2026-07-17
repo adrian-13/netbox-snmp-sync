@@ -15,7 +15,8 @@ from uuid import UUID, uuid4
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.db import models, transaction
-from django.db.models import Q
+from django.db.models import BooleanField, Case, F, IntegerField, Q, Value, When
+from django.db.models.functions import Now
 from django.urls import reverse
 from django.utils import timezone
 
@@ -170,11 +171,11 @@ class DeviceSNMPConfig(NetBoxModel):
         verbose_name="Infer VLANs from subinterfaces",
         help_text="Override dot-suffix VLAN inference for this device. Global = use global setting.",
     )
-    sync_interval_hours = models.PositiveIntegerField(
+    sync_interval_minutes = models.PositiveIntegerField(
         null=True,
         blank=True,
-        help_text="Per-device hours between automatic syncs. Blank = use global setting; 0 disables interval sync "
-                  "for this device unless Sync at hours is set.",
+        help_text="Per-device minutes between automatic syncs. Blank = use global setting; 0 disables interval "
+                  "sync for this device unless Sync at hours is set.",
     )
     sync_at_hours = models.CharField(
         max_length=64,
@@ -265,21 +266,86 @@ class DeviceSNMPConfig(NetBoxModel):
     def schedule_label(self):
         if self.sync_at_hours:
             return f"Hours {self.sync_at_hours}"
-        if self.sync_interval_hours is not None:
-            if self.sync_interval_hours == 0:
+        if self.sync_interval_minutes is not None:
+            if self.sync_interval_minutes == 0:
                 return "Disabled"
-            return f"Interval {self.sync_interval_hours}h"
+            return f"Interval {self.sync_interval_minutes}m"
         return "Global"
 
     @property
     def schedule_color(self):
         if self.sync_at_hours:
             return "purple"
-        if self.sync_interval_hours is not None:
-            if self.sync_interval_hours == 0:
+        if self.sync_interval_minutes is not None:
+            if self.sync_interval_minutes == 0:
                 return "gray"
             return "blue"
         return "gray"
+
+    @classmethod
+    def annotate_sort_keys(cls, queryset):
+        """Add DB-level sort keys mirroring ``schedule_label`` and ``sync_state``, so the
+        list view's Schedule / Sync state columns (rendered from those computed properties)
+        can be ordered by clicking their header.
+
+        This duplicates that Python logic in SQL — there's no way to derive one from the
+        other, so keep them in sync by hand if either changes. Global settings are read once
+        per call (i.e. once per request via the view, not baked in at import time) so a
+        settings change takes effect immediately.
+
+        schedule_sort: 0=Hours, 1=Disabled, 2=Interval, 3=Global (mirrors schedule_label).
+        sync_state_sort: 0=running, 1=queued, 2=retry_due, 3=due, 4=retry, 5=waiting,
+        6=disabled (mirrors sync_state, same branch order/precedence).
+        """
+        settings = SNMPSyncConfig.get()
+        global_interval = settings.sync_interval_minutes or 0
+        global_hours_enabled = bool(settings.sync_at_hours)
+
+        queryset = queryset.annotate(
+            schedule_sort=Case(
+                When(sync_at_hours__gt="", then=Value(0)),
+                When(sync_interval_minutes=0, then=Value(1)),
+                When(sync_interval_minutes__gt=0, then=Value(2)),
+                default=Value(3),  # Global
+                output_field=IntegerField(),
+            ),
+            _effective_interval=Case(
+                When(sync_interval_minutes__isnull=False, then=F("sync_interval_minutes")),
+                default=Value(global_interval),
+                output_field=IntegerField(),
+            ),
+            _effective_at_hours_enabled=Case(
+                When(sync_at_hours__gt="", then=Value(True)),
+                When(sync_interval_minutes__isnull=False, then=Value(False)),
+                default=Value(global_hours_enabled),
+                output_field=BooleanField(),
+            ),
+        )
+        queryset = queryset.annotate(
+            _schedule_enabled=Case(
+                When(
+                    Q(enabled=True) & (Q(_effective_interval__gt=0) | Q(_effective_at_hours_enabled=True)),
+                    then=Value(True),
+                ),
+                default=Value(False),
+                output_field=BooleanField(),
+            ),
+        )
+        is_retrying = Q(last_sync_status=SyncStatusChoices.FAILED) & Q(consecutive_sync_failures__gt=0)
+        is_sync_due = Q(enabled=True) & Q(next_sync_at__isnull=False) & Q(next_sync_at__lte=Now())
+        queryset = queryset.annotate(
+            sync_state_sort=Case(
+                When(sync_started_at__isnull=False, then=Value(0)),
+                When(sync_queued_at__isnull=False, then=Value(1)),
+                When(_schedule_enabled=False, then=Value(6)),
+                When(is_retrying & is_sync_due, then=Value(2)),
+                When(is_retrying, then=Value(4)),
+                When(is_sync_due, then=Value(3)),
+                default=Value(5),  # waiting
+                output_field=IntegerField(),
+            ),
+        )
+        return queryset
 
     def get_absolute_url(self):
         return reverse("plugins:netbox_snmp_sync:devicesnmpconfig", args=[self.pk])
@@ -302,7 +368,7 @@ class DeviceSNMPConfig(NetBoxModel):
         old = None
         if self.pk:
             old = type(self).objects.filter(pk=self.pk).values(
-                "enabled", "sync_interval_hours", "sync_at_hours", "vlan_group_id",
+                "enabled", "sync_interval_minutes", "sync_at_hours", "vlan_group_id",
             ).first()
 
         super().save(*args, **kwargs)
@@ -310,7 +376,7 @@ class DeviceSNMPConfig(NetBoxModel):
         created_without_next_sync = old is None and self.next_sync_at is None
         schedule_changed = old is not None and any(
             old[field] != getattr(self, field)
-            for field in ("enabled", "sync_interval_hours", "sync_at_hours")
+            for field in ("enabled", "sync_interval_minutes", "sync_at_hours")
         )
         if created_without_next_sync or schedule_changed:
             self.reset_next_sync(timezone.now())
@@ -433,15 +499,15 @@ class DeviceSNMPConfig(NetBoxModel):
         )
         return f"Global ({label})"
 
-    def get_effective_sync_interval_hours(self):
-        if self.sync_interval_hours is not None:
-            return self.sync_interval_hours
-        return get_setting("sync_interval_hours") or 0
+    def get_effective_sync_interval_minutes(self):
+        if self.sync_interval_minutes is not None:
+            return self.sync_interval_minutes
+        return get_setting("sync_interval_minutes") or 0
 
     def get_effective_sync_at_hours(self):
         if self.sync_at_hours:
             return self.sync_at_hours
-        if self.sync_interval_hours is not None:
+        if self.sync_interval_minutes is not None:
             return ""
         return get_setting("sync_at_hours") or ""
 
@@ -449,10 +515,10 @@ class DeviceSNMPConfig(NetBoxModel):
         return parse_sync_hours(self.get_effective_sync_at_hours())
 
     def is_schedule_enabled(self):
-        return bool(self.enabled and (self.get_effective_sync_interval_hours() > 0 or self.get_allowed_sync_hours()))
+        return bool(self.enabled and (self.get_effective_sync_interval_minutes() > 0 or self.get_allowed_sync_hours()))
 
     def uses_global_schedule(self):
-        return self.sync_interval_hours is None and not self.sync_at_hours
+        return self.sync_interval_minutes is None and not self.sync_at_hours
 
     def is_missed_schedule(self, reference=None):
         """Return whether a due schedule is old enough to skip as scheduler downtime.
@@ -481,7 +547,7 @@ class DeviceSNMPConfig(NetBoxModel):
         """Return the next scheduled sync time from a reference point, or None when disabled."""
         reference = reference or timezone.now()
         spread_offset = spread_offset or timedelta()
-        hours = self.get_effective_sync_interval_hours()
+        minutes = self.get_effective_sync_interval_minutes()
         allowed_hours = self.get_allowed_sync_hours()
 
         if not self.is_schedule_enabled():
@@ -497,14 +563,18 @@ class DeviceSNMPConfig(NetBoxModel):
                 candidates.append(candidate)
             return min(candidates) + spread_offset
 
-        return reference + timedelta(hours=hours) + spread_offset
+        return reference + timedelta(minutes=minutes) + spread_offset
 
     def get_retry_sync_time(self, reference=None):
-        """Return the next retry time after a failed scheduled sync."""
+        """Return the next retry time after a failed scheduled sync.
+
+        Backoff itself stays hours-based (1h/2h/4h/.../24h cap) regardless of the configured
+        interval unit — it's an independent escalation schedule, not a multiple of the interval.
+        """
         reference = reference or timezone.now()
         if self.get_allowed_sync_hours():
             return self.get_next_sync_time(reference)
-        if self.get_effective_sync_interval_hours() <= 0:
+        if self.get_effective_sync_interval_minutes() <= 0:
             return None
         delay_hours = min(2 ** max(self.consecutive_sync_failures - 1, 0), 24)
         return reference + timedelta(hours=delay_hours)
@@ -822,8 +892,8 @@ class SNMPSyncConfig(NetBoxModel):
     Seeded once from PLUGINS_CONFIG / default_settings on first access."""
 
     # scheduler
-    sync_interval_hours = models.PositiveIntegerField(
-        default=0, help_text="Hours between automatic syncs; 0 disables the interval scheduler "
+    sync_interval_minutes = models.PositiveIntegerField(
+        default=0, help_text="Minutes between automatic syncs; 0 disables the interval scheduler "
                              "(unless specific hours are set below).")
     sync_at_hours = models.CharField(
         max_length=64, blank=True, verbose_name="Sync at hours",
@@ -868,7 +938,7 @@ class SNMPSyncConfig(NetBoxModel):
     # skip_loopback_ips and default_ethernet_type live per-device on DeviceSNMPConfig;
     # their ultimate fallback is the plugin's default_settings (via get_setting()).
     _SEED_FIELDS = (
-        "sync_interval_hours", "sync_at_hours", "sync_job_timeout_seconds", "sync_stale_job_marker_minutes",
+        "sync_interval_minutes", "sync_at_hours", "sync_job_timeout_seconds", "sync_stale_job_marker_minutes",
         "sync_missed_schedule_grace_minutes",
         "sync_interfaces", "sync_ip_addresses", "update_existing", "set_mac_address", "write_vlans", "create_vlans",
         "vlan_subinterface_inference",
@@ -964,20 +1034,20 @@ def get_schedule_spread_window(configs=None):
             if config.get_allowed_sync_hours():
                 windows.append(timedelta(minutes=SCHEDULE_SPREAD_MAX_MINUTES))
                 continue
-            hours = config.get_effective_sync_interval_hours()
-            if hours > 0:
-                windows.append(timedelta(minutes=min(SCHEDULE_SPREAD_MAX_MINUTES, max(hours * 60 - 1, 0))))
+            minutes = config.get_effective_sync_interval_minutes()
+            if minutes > 0:
+                windows.append(timedelta(minutes=min(SCHEDULE_SPREAD_MAX_MINUTES, max(minutes - 1, 0))))
         return min(windows) if windows else timedelta()
 
-    hours = get_setting("sync_interval_hours") or 0
+    minutes = get_setting("sync_interval_minutes") or 0
     allowed_hours = parse_sync_hours(get_setting("sync_at_hours"))
-    if hours <= 0 and not allowed_hours:
+    if minutes <= 0 and not allowed_hours:
         return timedelta()
 
     if allowed_hours:
         return timedelta(minutes=SCHEDULE_SPREAD_MAX_MINUTES)
 
-    return timedelta(minutes=min(SCHEDULE_SPREAD_MAX_MINUTES, max(hours * 60 - 1, 0)))
+    return timedelta(minutes=min(SCHEDULE_SPREAD_MAX_MINUTES, max(minutes - 1, 0)))
 
 
 def get_schedule_spread_offsets(count, spread_window):

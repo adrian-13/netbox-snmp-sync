@@ -127,7 +127,7 @@ touch existing VLANs.
 Plugin-level settings are stored in a database-backed singleton (`SNMPSyncConfig`) and
 editable at **SNMP Sync → Settings** without restarting NetBox:
 
-- Sync interval (hours), sync interfaces/IPs, update existing objects, set MAC address
+- Sync interval (minutes), sync interfaces/IPs, update existing objects, set MAC address
 - VLAN write / auto-create, history retention (days + count)
 
 ### Bulk device setup
@@ -229,7 +229,7 @@ PLUGINS_CONFIG = {
                                                 # auto infers parent.<vid> only for MikroTik
 
         # ── Scheduler ───────────────────────────────────────────────────────────────
-        "sync_interval_hours": 24,  # 0 = interval scheduler disabled
+        "sync_interval_minutes": 1440,  # 0 = interval scheduler disabled
         "sync_at_hours": "",        # e.g. "3" or "3,15" → run only at those hours of the
                                     # day (interval is then ignored). Blank = use interval.
 
@@ -295,13 +295,14 @@ reverted, the **Revert run** button is available.
 
 There are two scheduling modes, both configured at **SNMP Sync → Settings**:
 
-- **Interval mode** — set `sync_interval_hours` to a positive integer. The scheduler check
-  runs every few minutes and queues a sync for every enabled device whose **Next sync** time
-  is due. **Scheduled SNMP Sync** is only a scheduler check; actual per-device **SNMP Sync**
-  jobs are queued only when a device is due. Changing the interval recalculates each device's
-  **Next sync** from the time the setting is saved, and due devices are picked up on the next
-  scheduler check. When multiple devices are re-anchored at once, their next runs are spread
-  over a short window so they do not all start at the same second.
+- **Interval mode** — set `sync_interval_minutes` to a positive integer. The scheduler check
+  runs every 5 minutes and queues a sync for every enabled device whose **Next sync** time
+  is due — so intervals shorter than 5 minutes won't run any more often than that. **Scheduled
+  SNMP Sync** is only a scheduler check; actual per-device **SNMP Sync** jobs are queued only
+  when a device is due. Changing the interval recalculates each device's **Next sync** from the
+  time the setting is saved, and due devices are picked up on the next scheduler check. When
+  multiple devices are re-anchored at once, their next runs are spread over a short window so
+  they do not all start at the same second.
 - **Fixed-hour mode** — set **Sync at hours** to one or more hours of the day (0–23,
   comma-separated, e.g. `3` or `3,15`). Syncs then run only during those hours (e.g. daily at
   03:00). When set, the interval is ignored.
@@ -320,10 +321,10 @@ only if you explicitly want to disable this guard.
 
 Each **Device SNMP Configuration** can override the global scheduler:
 
-- Leave **Sync interval hours** and **Sync at hours** blank to inherit the global schedule.
-- Set **Sync interval hours** on one device to give it its own rolling interval.
+- Leave **Sync interval minutes** and **Sync at hours** blank to inherit the global schedule.
+- Set **Sync interval minutes** on one device to give it its own rolling interval.
 - Set **Sync at hours** on one device to run that device only at specific local hours.
-- Set **Sync interval hours** to `0` with no per-device hours to disable automatic sync for
+- Set **Sync interval minutes** to `0` with no per-device hours to disable automatic sync for
   that device while keeping manual sync available.
 
 Changing a per-device schedule immediately re-anchors that device's **Next sync**. Changing
@@ -427,6 +428,36 @@ No internal NetBox code is imported directly.
 ---
 
 ## Changelog
+
+### v0.3.11
+- **Device type / manufacturer / site on SNMP views** - the SNMP Sync panel now shows the
+  device's Manufacturer and Device Type, and the Device SNMP Configs list gained Site and
+  Device Type columns.
+- **Sortable Schedule / Sync state columns** - both are now orderable by clicking their
+  header, backed by a DB-level annotation that mirrors the `schedule_label` / `sync_state`
+  logic exactly (verified against every branch, not just the common cases).
+- **Filters panel** - the Device SNMP Configs list now has a proper NetBox-style Filters
+  panel (Device, Site, SNMP version, sync behaviour toggles), matching how core models like
+  Device expose filtering.
+- **Tags column** - added to the Device SNMP Configs list, same `TagColumn` NetBox itself
+  uses elsewhere.
+- **Bulk "Sync & schedule"** - added a bulk action alongside Test selected / Recalculate
+  schedule, queuing an isolated apply-and-reschedule job per selected device.
+- **Trimmed and renamed confusing actions** - removed **Compare** (fully superseded by
+  Preview & write) and **Sync all** (redundant with Sync & schedule, differed only in
+  whether it reset the schedule — an easy way to click the wrong one). Renamed
+  "Reconcile marker(s)" to **Clear stuck sync(s)**, since "marker" is internal jargon.
+- **Sync interval is now minutes, not hours** - `sync_interval_hours` is renamed to
+  `sync_interval_minutes` on both global settings and per-device overrides. Existing values
+  are converted automatically on upgrade (hours × 60) so real-world schedule timing is
+  unchanged. Retry backoff (1h/2h/4h/…/24h) and Sync at hours are unaffected — only the
+  interval setting's unit changed.
+- **MAC address reassignment on same-device conflicts** - when a collected MAC address
+  already belongs to a different interface on the *same* device (common for virtual
+  interfaces like bridges that report a physical port's MAC over SNMP), the sync now
+  reassigns it instead of silently skipping it forever. Conflicts with a MAC already
+  assigned on a *different* device are still left alone (more likely a real data problem)
+  but now surface a clear warning instead of failing silently.
 
 ### v0.3.10
 - **Retroactive VLAN group assignment** - setting or changing a device SNMP config's

@@ -3,15 +3,22 @@ from django.core.exceptions import ValidationError
 from django.utils.html import format_html, format_html_join
 from django.utils import timezone
 
-from dcim.models import Device
+from dcim.models import Device, Site
 from ipam.models import VLANGroup
-from netbox.forms import NetBoxModelBulkEditForm, NetBoxModelForm, NetBoxModelImportForm
-from utilities.forms import add_blank_choice
+from netbox.forms import (
+    NetBoxModelBulkEditForm,
+    NetBoxModelFilterSetForm,
+    NetBoxModelForm,
+    NetBoxModelImportForm,
+)
+from utilities.forms import BOOLEAN_WITH_BLANK_CHOICES, add_blank_choice
 from utilities.forms.fields import (
     CSVModelChoiceField,
     DynamicModelChoiceField,
     DynamicModelMultipleChoiceField,
+    TagFilterField,
 )
+from utilities.forms.rendering import FieldSet
 from utilities.forms.widgets import BulkEditNullBooleanSelect
 
 from .choices import SNMPVersionChoices, VlanSubinterfaceInferenceChoices
@@ -183,10 +190,43 @@ class DeviceSNMPConfigForm(SyncHoursFormMixin, NetBoxModelForm):
             "create_vlans",
             "vlan_group",
             "vlan_subinterface_inference",
-            "sync_interval_hours",
+            "sync_interval_minutes",
             "sync_at_hours",
             "tags",
         )
+
+
+class DeviceSNMPConfigFilterForm(NetBoxModelFilterSetForm):
+    model = DeviceSNMPConfig
+    fieldsets = (
+        FieldSet("q", "filter_id", "tag"),
+        FieldSet("device_id", "site_id", "enabled", "snmp_version", name="Device"),
+        FieldSet(
+            "sync_interfaces", "sync_ip_addresses", "update_existing", "set_mac_address",
+            "write_vlans", "create_vlans",
+            name="Sync behaviour",
+        ),
+    )
+
+    device_id = DynamicModelMultipleChoiceField(
+        queryset=Device.objects.all(),
+        required=False,
+        label="Device",
+    )
+    site_id = DynamicModelMultipleChoiceField(
+        queryset=Site.objects.all(),
+        required=False,
+        label="Site",
+    )
+    enabled = forms.NullBooleanField(required=False, widget=forms.Select(choices=BOOLEAN_WITH_BLANK_CHOICES))
+    snmp_version = forms.MultipleChoiceField(choices=SNMPVersionChoices, required=False)
+    sync_interfaces = forms.NullBooleanField(required=False, widget=forms.Select(choices=BOOLEAN_WITH_BLANK_CHOICES))
+    sync_ip_addresses = forms.NullBooleanField(required=False, widget=forms.Select(choices=BOOLEAN_WITH_BLANK_CHOICES))
+    update_existing = forms.NullBooleanField(required=False, widget=forms.Select(choices=BOOLEAN_WITH_BLANK_CHOICES))
+    set_mac_address = forms.NullBooleanField(required=False, widget=forms.Select(choices=BOOLEAN_WITH_BLANK_CHOICES))
+    write_vlans = forms.NullBooleanField(required=False, widget=forms.Select(choices=BOOLEAN_WITH_BLANK_CHOICES))
+    create_vlans = forms.NullBooleanField(required=False, widget=forms.Select(choices=BOOLEAN_WITH_BLANK_CHOICES))
+    tag = TagFilterField(DeviceSNMPConfig)
 
 
 class DeviceSNMPConfigBulkEditForm(SyncHoursFormMixin, NetBoxModelBulkEditForm):
@@ -213,7 +253,7 @@ class DeviceSNMPConfigBulkEditForm(SyncHoursFormMixin, NetBoxModelBulkEditForm):
         choices=VLAN_INFERENCE_BULK_CHOICES,
         required=False,
     )
-    sync_interval_hours = forms.IntegerField(required=False, min_value=0)
+    sync_interval_minutes = forms.IntegerField(required=False, min_value=0)
     sync_at_hours = forms.CharField(required=False)
 
     nullable_fields = (
@@ -226,7 +266,7 @@ class DeviceSNMPConfigBulkEditForm(SyncHoursFormMixin, NetBoxModelBulkEditForm):
         "write_vlans",
             "create_vlans",
             "vlan_subinterface_inference",
-            "sync_interval_hours",
+            "sync_interval_minutes",
     )
 
 
@@ -246,7 +286,7 @@ class DeviceSNMPConfigImportForm(SyncHoursFormMixin, NetBoxModelImportForm):
             "rename_device_to_sysname",
             "sync_interfaces", "sync_ip_addresses", "update_existing", "set_mac_address",
             "write_vlans", "create_vlans", "vlan_subinterface_inference",
-            "sync_interval_hours", "sync_at_hours",
+            "sync_interval_minutes", "sync_at_hours",
         )
 
 
@@ -256,7 +296,7 @@ class SNMPSyncConfigForm(NetBoxModelForm):
     class Meta:
         model = SNMPSyncConfig
         fields = (
-            "sync_interval_hours", "sync_at_hours", "sync_job_timeout_seconds",
+            "sync_interval_minutes", "sync_at_hours", "sync_job_timeout_seconds",
             "sync_stale_job_marker_minutes", "sync_missed_schedule_grace_minutes",
             "sync_interfaces", "sync_ip_addresses",
             "update_existing", "set_mac_address", "write_vlans", "create_vlans",
@@ -288,7 +328,7 @@ class SNMPSyncConfigForm(NetBoxModelForm):
         return ",".join(str(h) for h in sorted(set(hours)))
 
     def save(self, commit=True):
-        schedule_changed = bool({"sync_interval_hours", "sync_at_hours"} & set(self.changed_data))
+        schedule_changed = bool({"sync_interval_minutes", "sync_at_hours"} & set(self.changed_data))
         obj = super().save(commit=commit)
         if commit and schedule_changed:
             DeviceSNMPConfig.reset_all_next_sync(timezone.now(), global_only=True)

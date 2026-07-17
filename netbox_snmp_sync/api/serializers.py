@@ -17,7 +17,7 @@ class DeviceSNMPConfigSerializer(NetBoxModelSerializer):
             "rename_device_to_sysname",
             "sync_interfaces", "sync_ip_addresses", "update_existing", "set_mac_address",
             "write_vlans", "create_vlans", "vlan_subinterface_inference",
-            "sync_interval_hours", "sync_at_hours",
+            "sync_interval_minutes", "sync_at_hours",
             "last_sync_at", "last_sync_status", "last_sync_message",
             "next_sync_at", "consecutive_sync_failures",
             "sync_job_id", "sync_queued_at", "sync_started_at",

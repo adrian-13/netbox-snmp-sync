@@ -121,6 +121,7 @@ class SecurityTestCase(TestCase):
             ("devicesnmpconfig_reconcile_marker", [self.cfg.pk]),
             ("devicesnmpconfig_bulk_reset_schedule", []),
             ("devicesnmpconfig_bulk_reconcile_markers", []),
+            ("devicesnmpconfig_bulk_sync", []),
             ("bulk_setup", []),
         ]:
             url = reverse(f"plugins:netbox_snmp_sync:{name}", args=args)
@@ -430,6 +431,39 @@ class SecurityTestCase(TestCase):
         self.assertEqual(r.url, "/jobs/1/")
         enqueue.assert_called_once()
 
+    def test_bulk_sync_action_requires_change_permission(self):
+        c = Client()
+        c.force_login(self.viewer)
+        url = reverse("plugins:netbox_snmp_sync:devicesnmpconfig_bulk_sync")
+
+        with patch("netbox_snmp_sync.views.SNMPSyncJob.enqueue") as enqueue:
+            r = c.post(url, {"pk": [self.cfg.pk]})
+
+        self.assertEqual(r.status_code, 302)
+        enqueue.assert_not_called()
+        self.cfg.refresh_from_db()
+        self.assertIsNone(self.cfg.sync_job_id)
+
+    def test_bulk_sync_action_allows_change_permission(self):
+        c = Client()
+        c.force_login(self.operator)
+        url = reverse("plugins:netbox_snmp_sync:devicesnmpconfig_bulk_sync")
+        fake_job = SimpleNamespace(
+            job_id="11111111-1111-1111-1111-111111111111",
+            get_absolute_url=lambda: "/jobs/1/",
+        )
+
+        with patch("netbox_snmp_sync.views.SNMPSyncJob.enqueue", return_value=fake_job) as enqueue:
+            r = c.post(url, {"pk": [self.cfg.pk]})
+
+        self.assertEqual(r.status_code, 302)
+        enqueue.assert_called_once()
+        kwargs = enqueue.call_args.kwargs
+        self.assertEqual(kwargs["mode"], "apply")
+        self.assertTrue(kwargs["reset_schedule"])
+        self.cfg.refresh_from_db()
+        self.assertEqual(str(self.cfg.sync_job_id), fake_job.job_id)
+
     def test_single_test_action_does_not_accept_get(self):
         c = Client()
         c.force_login(self.admin)
@@ -505,7 +539,7 @@ class SecurityTestCase(TestCase):
 
     def test_reset_schedule_action_allows_change_permission(self):
         settings = SNMPSyncConfig.get()
-        settings.sync_interval_hours = 8
+        settings.sync_interval_minutes = 8
         settings.sync_at_hours = ""
         settings.save()
         c = Client()
@@ -589,7 +623,7 @@ class SecurityTestCase(TestCase):
 
     def test_bulk_reset_schedule_action_allows_change_permission(self):
         settings = SNMPSyncConfig.get()
-        settings.sync_interval_hours = 8
+        settings.sync_interval_minutes = 8
         settings.sync_at_hours = ""
         settings.save()
         self.cfg.next_sync_at = timezone.now() - timedelta(days=1)

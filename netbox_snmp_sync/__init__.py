@@ -8,7 +8,7 @@ run history) lives natively in the NetBox UI and its background-job framework.
 """
 from netbox.plugins import PluginConfig
 
-__version__ = "0.3.10"
+__version__ = "0.3.11"
 
 
 class NetBoxSNMPSyncConfig(PluginConfig):
@@ -44,8 +44,8 @@ class NetBoxSNMPSyncConfig(PluginConfig):
         "write_vlans": False,
         "create_vlans": False,           # auto-create missing VLANs in the device's site
         "vlan_subinterface_inference": "auto",  # auto | enabled | disabled
-        # scheduler: hours between automatic syncs; 0 disables the periodic job
-        "sync_interval_hours": 0,
+        # scheduler: minutes between automatic syncs; 0 disables the periodic job
+        "sync_interval_minutes": 0,
         # scheduler: restrict syncs to these hours of the day (e.g. "3" or "3,15"); blank = any
         "sync_at_hours": "",
         # background job safety limit; 0 disables the wrapper timeout

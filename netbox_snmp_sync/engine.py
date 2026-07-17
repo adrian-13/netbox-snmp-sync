@@ -212,8 +212,15 @@ def compare_device(
 
 # ─────────────────────────────── apply (write, add-only) ───────────────────────────────
 
-def _assign_mac(iface: Interface, mac: str):
-    """NetBox >= 4.2: create a MACAddress object and set it as the interface's primary MAC."""
+def _assign_mac(iface: Interface, mac: str) -> tuple[bool, str | None]:
+    """NetBox >= 4.2: create a MACAddress object and set it as the interface's primary MAC.
+
+    If ``mac`` already belongs to a different interface on the SAME device, it is reassigned
+    here — common for virtual interfaces (e.g. a bridge) that report a physical port's MAC over
+    SNMP. If it belongs to something on a different device, the assignment is skipped instead —
+    that's more likely a real data problem (duplicate/misconfigured device) than a benign quirk,
+    so it isn't touched automatically. Returns ``(success, warning_or_None)``.
+    """
     try:
         mac_obj = MACAddress.objects.filter(mac_address=mac).first()
         if mac_obj is None:
@@ -222,14 +229,26 @@ def _assign_mac(iface: Interface, mac: str):
             mac_obj.assigned_object = iface
             mac_obj.save()
         elif mac_obj.assigned_object != iface:
-            log.warning("interface %s: MAC %s is already assigned to %s", iface.name, mac, mac_obj.assigned_object)
-            return False
+            current = mac_obj.assigned_object
+            same_device = isinstance(current, Interface) and current.device_id == iface.device_id
+            current_desc = f"{current.device} / {current.name}" if isinstance(current, Interface) else str(current)
+            if not same_device:
+                log.warning("interface %s: MAC %s is already assigned to %s", iface.name, mac, current_desc)
+                return False, f"{iface.name}: MAC {mac} is already assigned to {current_desc} — skipped"
+            log.info("interface %s: reassigning MAC %s from %s (same device)", iface.name, mac, current_desc)
+            # Interface.primary_mac_address is unique — clear the old holder first, or
+            # pointing the new interface at the same MACAddress row violates that constraint.
+            if isinstance(current, Interface) and current.primary_mac_address_id == mac_obj.pk:
+                current.primary_mac_address = None
+                current.save(update_fields=["primary_mac_address"])
+            mac_obj.assigned_object = iface
+            mac_obj.save()
         iface.primary_mac_address = mac_obj
         iface.save()
-        return True
+        return True, None
     except Exception as exc:  # noqa: BLE001
         log.warning("interface %s: could not set MAC %s: %s", iface.name, mac, exc)
-        return False
+        return False, f"{iface.name}: could not set MAC {mac}: {exc}"
 
 
 def apply_sync(
@@ -298,14 +317,18 @@ def apply_sync(
                         field="primary_mac_address",
                         new_value=iface.mac,
                     ))
-                elif _assign_mac(rec, iface.mac):
-                    result.changes.append(SyncChange(
-                        action="updated",
-                        object_type="interface",
-                        object_repr=rec.name,
-                        field="primary_mac_address",
-                        new_value=iface.mac,
-                    ))
+                else:
+                    assigned, warning = _assign_mac(rec, iface.mac)
+                    if assigned:
+                        result.changes.append(SyncChange(
+                            action="updated",
+                            object_type="interface",
+                            object_repr=rec.name,
+                            field="primary_mac_address",
+                            new_value=iface.mac,
+                        ))
+                    elif warning:
+                        result.warnings.append(warning)
             if update_existing:
                 update_targets.append((iface, rec))
             else:
@@ -344,7 +367,9 @@ def apply_sync(
                 new_value=iface.nb_type,
             ))
             if set_mac_address and iface.mac:
-                _assign_mac(new, iface.mac)
+                _, mac_warning = _assign_mac(new, iface.mac)
+                if mac_warning:
+                    result.warnings.append(mac_warning)
         result.interfaces_created += 1
 
     _set_parents(data, created, name_to_iface, result, dry_run)

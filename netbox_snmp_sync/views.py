@@ -127,10 +127,16 @@ class DeviceSNMPSyncTabView(generic.ObjectView):
 
 @register_model_view(DeviceSNMPConfig, name="list", path="", detail=False)
 class DeviceSNMPConfigListView(generic.ObjectListView):
-    queryset = DeviceSNMPConfig.objects.all()
+    queryset = DeviceSNMPConfig.objects.select_related("device", "device__site", "device__device_type")
     table = tables.DeviceSNMPConfigTable
     filterset = filtersets.DeviceSNMPConfigFilterSet
+    filterset_form = forms.DeviceSNMPConfigFilterForm
     template_name = "netbox_snmp_sync/device_snmp_config_list.html"
+
+    def get_queryset(self, request):
+        # Annotated fresh per request (not baked into the class-level queryset) so a
+        # change to the global schedule settings takes effect immediately.
+        return DeviceSNMPConfig.annotate_sort_keys(super().get_queryset(request))
 
 
 @register_model_view(DeviceSNMPConfig)
@@ -274,6 +280,59 @@ class DeviceSNMPConfigBulkTestView(LoginRequiredMixin, View):
         })
 
 
+@register_model_view(DeviceSNMPConfig, "bulk_sync", path="sync", detail=False)
+class DeviceSNMPConfigBulkSyncView(LoginRequiredMixin, View):
+    """Queue an SNMP apply sync (with schedule reset) for every selected device SNMP config,
+    mirroring the single-device 'Sync & schedule' button. Each device gets its own isolated
+    job; one device that's already queued/running or fails to enqueue doesn't block the rest.
+    """
+
+    list_url = "plugins:netbox_snmp_sync:devicesnmpconfig_list"
+
+    def get(self, request):
+        return redirect(self.list_url)
+
+    def post(self, request):
+        if not request.user.has_perm("netbox_snmp_sync.change_devicesnmpconfig"):
+            messages.error(request, "You do not have permission to run SNMP sync.")
+            return redirect(self.list_url)
+
+        if request.POST.get("_all"):
+            qs = DeviceSNMPConfig.objects.all()
+        else:
+            qs = DeviceSNMPConfig.objects.filter(pk__in=request.POST.getlist("pk"))
+        configs = list(qs.select_related("device"))
+        if not configs:
+            messages.warning(request, "No SNMP configurations selected.")
+            return redirect(self.list_url)
+
+        queued = skipped_active = errors = 0
+        for config in configs:
+            if not config.claim_sync_slot():
+                skipped_active += 1
+                continue
+            try:
+                job = SNMPSyncJob.enqueue(
+                    config_pk=config.pk,
+                    user=request.user,
+                    mode=SyncModeChoices.APPLY,
+                    reset_schedule=True,
+                )
+                config.mark_sync_queued(job.job_id)
+                queued += 1
+            except Exception:
+                config.clear_sync_job()
+                errors += 1
+
+        suffix = f", {errors} failed to queue" if errors else ""
+        messages.success(
+            request,
+            f"Queued SNMP sync & schedule reset for {queued} device(s), "
+            f"{skipped_active} already active{suffix}.",
+        )
+        return redirect(self.list_url)
+
+
 @register_model_view(DeviceSNMPConfig, "bulk_reconcile_markers", path="reconcile-markers", detail=False)
 class DeviceSNMPConfigBulkReconcileMarkersView(LoginRequiredMixin, View):
     """Clear stale queued/running sync markers for selected SNMP configs."""
@@ -309,7 +368,7 @@ class DeviceSNMPConfigBulkReconcileMarkersView(LoginRequiredMixin, View):
 
         messages.success(
             request,
-            f"Reconciled SNMP sync markers: cleared {cleared}, still active/recent {active}, no marker {no_marker}.",
+            f"Cleared stuck syncs: {cleared} cleared, {active} still active/recent, {no_marker} not stuck.",
         )
         return redirect(self.list_url)
 
@@ -379,16 +438,16 @@ class DeviceSNMPConfigReconcileMarkerView(LoginRequiredMixin, View):
             return redirect(config.get_absolute_url())
 
         if not config.sync_job_id:
-            messages.info(request, f"{config.device} has no queued/running SNMP sync marker.")
+            messages.info(request, f"{config.device} has no stuck SNMP sync.")
             return redirect(config.get_absolute_url())
 
         marker = config.sync_job_id
         if config.clear_stale_sync_job(timezone.now()):
-            messages.success(request, f"Cleared stale SNMP sync marker {marker} for {config.device}.")
+            messages.success(request, f"Cleared stuck SNMP sync {marker} for {config.device}.")
         else:
             messages.warning(
                 request,
-                f"SNMP sync marker {marker} for {config.device} still matches an active or recent job.",
+                f"SNMP sync {marker} for {config.device} still matches an active or recent job.",
             )
         return redirect(config.get_absolute_url())
 

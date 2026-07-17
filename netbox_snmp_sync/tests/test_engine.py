@@ -7,7 +7,7 @@ from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from core.models import Job
-from dcim.models import Device, DeviceRole, DeviceType, Interface, Manufacturer, Site
+from dcim.models import Device, DeviceRole, DeviceType, Interface, MACAddress, Manufacturer, Site
 from ipam.models import VLAN, IPAddress, VLANGroup
 
 from netbox_snmp_sync import engine, views
@@ -21,6 +21,7 @@ from netbox_snmp_sync.jobs import (
     _fake_request,
     _sync_one,
 )
+from netbox_snmp_sync.choices import SyncStatusChoices
 from netbox_snmp_sync.models import DeviceSNMPConfig, SNMPSyncConfig, SyncRun
 
 
@@ -150,6 +151,42 @@ class EngineTestCase(TestCase):
             and change.field == "primary_mac_address"
             for change in result.changes
         ))
+
+    def test_apply_reassigns_mac_from_interface_on_same_device(self):
+        other = Interface.objects.create(device=self.device, name="old-ether1", type="1000base-t", enabled=True)
+        mac = MACAddress.objects.create(mac_address="AA:BB:CC:DD:EE:01", assigned_object=other)
+        other.primary_mac_address = mac
+        other.save()
+
+        result = engine.apply_sync(self.device, _device_data(), dry_run=False)
+
+        other.refresh_from_db()
+        eth1 = Interface.objects.get(device=self.device, name="ether1")
+        self.assertIsNone(other.primary_mac_address_id)
+        self.assertIsNotNone(eth1.primary_mac_address)
+        self.assertEqual(str(eth1.primary_mac_address.mac_address), "AA:BB:CC:DD:EE:01")
+        self.assertEqual(result.warnings, [])
+
+    def test_apply_does_not_steal_mac_from_interface_on_different_device(self):
+        other_site = Site.objects.create(name="Other", slug="other-mac-test")
+        other_device = Device.objects.create(
+            name="other-device", device_type=self.device.device_type,
+            role=self.device.role, site=other_site,
+        )
+        other_iface = Interface.objects.create(device=other_device, name="ether1", type="1000base-t", enabled=True)
+        mac = MACAddress.objects.create(mac_address="AA:BB:CC:DD:EE:01", assigned_object=other_iface)
+        other_iface.primary_mac_address = mac
+        other_iface.save()
+
+        result = engine.apply_sync(self.device, _device_data(), dry_run=False)
+
+        other_iface.refresh_from_db()
+        eth1 = Interface.objects.get(device=self.device, name="ether1")
+        self.assertEqual(other_iface.primary_mac_address_id, mac.pk)
+        self.assertIsNone(eth1.primary_mac_address_id)
+        # Both devices happen to name this interface "ether1" — the warning must disambiguate
+        # by device, or it's useless for figuring out which one actually holds the MAC.
+        self.assertTrue(any("already assigned" in w and "other-device" in w for w in result.warnings))
 
     def test_apply_assigns_existing_unassigned_ip_to_interface(self):
         iface = Interface.objects.create(device=self.device, name="ether1", type="1000base-t", enabled=True)
@@ -370,6 +407,63 @@ class DeviceSNMPConfigTestCase(TestCase):
         cfg.save()
         self.assertEqual(cfg.to_spec().vlan_subinterface_inference, "disabled")
 
+    def test_annotate_sort_keys_matches_schedule_and_sync_state_properties(self):
+        """DB-level schedule_sort/sync_state_sort must agree with the Python properties
+        they mirror (schedule_label/sync_state) across every branch, since the list view's
+        Schedule/Sync state columns are ordered by the annotation but rendered from the
+        property — a mismatch would make the sort silently misleading."""
+        settings = SNMPSyncConfig.get()
+        settings.sync_interval_minutes = 6
+        settings.sync_at_hours = ""
+        settings.save()
+
+        now = timezone.now()
+        site = self.device.site
+        mf = self.device.device_type.manufacturer
+        dt = self.device.device_type
+        role = self.device.role
+
+        def make(name, **kwargs):
+            device = Device.objects.create(name=name, device_type=dt, role=role, site=site)
+            return DeviceSNMPConfig.objects.create(device=device, snmp_version="2c", community="public", **kwargs)
+
+        cases = [
+            make("c-running", sync_started_at=now),
+            make("c-queued", sync_queued_at=now),
+            make("c-disabled-flag", enabled=False),
+            make("c-disabled-interval0", sync_interval_minutes=0),
+            make(
+                "c-retry-due", last_sync_status=SyncStatusChoices.FAILED,
+                consecutive_sync_failures=2, next_sync_at=now - timedelta(hours=1),
+            ),
+            make(
+                "c-retry-not-due", last_sync_status=SyncStatusChoices.FAILED,
+                consecutive_sync_failures=2, next_sync_at=now + timedelta(hours=1),
+            ),
+            make("c-due", last_sync_status=SyncStatusChoices.OK, next_sync_at=now - timedelta(hours=1)),
+            make("c-waiting", last_sync_status=SyncStatusChoices.OK, next_sync_at=now + timedelta(hours=1)),
+            make("c-global"),
+            make("c-hours", sync_at_hours="3,15"),
+            make("c-interval", sync_interval_minutes=4),
+        ]
+
+        state_priority = {
+            "running": 0, "queued": 1, "retry_due": 2, "due": 3, "retry": 4, "waiting": 5, "disabled": 6,
+        }
+        qs = DeviceSNMPConfig.annotate_sort_keys(
+            DeviceSNMPConfig.objects.filter(pk__in=[c.pk for c in cases])
+        )
+        for cfg in qs:
+            with self.subTest(device=cfg.device.name):
+                self.assertEqual(cfg.sync_state_sort, state_priority[cfg.sync_state])
+                expected_schedule_sort = (
+                    0 if cfg.schedule_label.startswith("Hours ") else
+                    1 if cfg.schedule_label == "Disabled" else
+                    2 if cfg.schedule_label.startswith("Interval ") else
+                    3
+                )
+                self.assertEqual(cfg.schedule_sort, expected_schedule_sort)
+
     def test_setting_vlan_group_assigns_existing_device_vlans(self):
         untagged = VLAN.objects.create(vid=10, name="ten", site=self.device.site)
         tagged = VLAN.objects.create(vid=20, name="twenty", site=self.device.site)
@@ -483,13 +577,13 @@ class DeviceSNMPConfigTestCase(TestCase):
         self.assertFalse(request.user.is_active)
 
     def test_next_sync_uses_interval_setting(self):
-        SNMPSyncConfig.objects.create(sync_interval_hours=8)
+        SNMPSyncConfig.objects.create(sync_interval_minutes=8)
         cfg = DeviceSNMPConfig.objects.create(device=self.device, snmp_version="2c", community="public")
         ref = timezone.now()
-        self.assertEqual(cfg.get_next_sync_time(ref), ref + timedelta(hours=8))
+        self.assertEqual(cfg.get_next_sync_time(ref), ref + timedelta(minutes=8))
 
     def test_scheduled_sync_advances_next_sync(self):
-        SNMPSyncConfig.objects.create(sync_interval_hours=8)
+        SNMPSyncConfig.objects.create(sync_interval_minutes=8)
         cfg = DeviceSNMPConfig.objects.create(device=self.device, snmp_version="2c", community="public")
         run = SyncRun.objects.create(device=self.device, trigger="scheduled", mode="apply", status="ok")
 
@@ -501,7 +595,7 @@ class DeviceSNMPConfigTestCase(TestCase):
         self.assertGreater(cfg.next_sync_at, cfg.last_sync_at)
 
     def test_manual_sync_does_not_reset_next_sync(self):
-        SNMPSyncConfig.objects.create(sync_interval_hours=8)
+        SNMPSyncConfig.objects.create(sync_interval_minutes=8)
         cfg = DeviceSNMPConfig.objects.create(
             device=self.device, snmp_version="2c", community="public",
             next_sync_at=timezone.now() + timedelta(hours=2),
@@ -515,7 +609,7 @@ class DeviceSNMPConfigTestCase(TestCase):
         self.assertEqual(cfg.next_sync_at, original_next)
 
     def test_manual_sync_can_reset_next_sync(self):
-        SNMPSyncConfig.objects.create(sync_interval_hours=8)
+        SNMPSyncConfig.objects.create(sync_interval_minutes=8)
         cfg = DeviceSNMPConfig.objects.create(
             device=self.device, snmp_version="2c", community="public",
             next_sync_at=timezone.now() + timedelta(hours=2),
@@ -525,10 +619,10 @@ class DeviceSNMPConfigTestCase(TestCase):
         cfg.record_sync_result(run, update_schedule=True)
         cfg.refresh_from_db()
 
-        self.assertEqual(cfg.next_sync_at, cfg.last_sync_at + timedelta(hours=8))
+        self.assertEqual(cfg.next_sync_at, cfg.last_sync_at + timedelta(minutes=8))
 
     def test_failed_scheduled_sync_uses_retry_backoff(self):
-        SNMPSyncConfig.objects.create(sync_interval_hours=8)
+        SNMPSyncConfig.objects.create(sync_interval_minutes=8)
         cfg = DeviceSNMPConfig.objects.create(device=self.device, snmp_version="2c", community="public")
         run = SyncRun.objects.create(device=self.device, trigger="scheduled", mode="apply", status="failed")
 
@@ -541,7 +635,7 @@ class DeviceSNMPConfigTestCase(TestCase):
         self.assertEqual(cfg.sync_state_label, "Retry")
 
     def test_failed_scheduled_sync_due_shows_retry_due(self):
-        SNMPSyncConfig.objects.create(sync_interval_hours=8)
+        SNMPSyncConfig.objects.create(sync_interval_minutes=8)
         cfg = DeviceSNMPConfig.objects.create(device=self.device, snmp_version="2c", community="public")
         run = SyncRun.objects.create(device=self.device, trigger="scheduled", mode="apply", status="failed")
         cfg.record_sync_result(run, update_schedule=True)
@@ -552,7 +646,7 @@ class DeviceSNMPConfigTestCase(TestCase):
         self.assertEqual(cfg.sync_state_label, "Retry due")
 
     def test_fixed_hour_sync_uses_next_configured_hour(self):
-        SNMPSyncConfig.objects.create(sync_interval_hours=8, sync_at_hours="3,15")
+        SNMPSyncConfig.objects.create(sync_interval_minutes=8, sync_at_hours="3,15")
         cfg = DeviceSNMPConfig.objects.create(device=self.device, snmp_version="2c", community="public")
         ref = timezone.now().replace(hour=4, minute=30, second=0, microsecond=0)
 
@@ -562,21 +656,21 @@ class DeviceSNMPConfigTestCase(TestCase):
         self.assertGreater(next_sync, ref)
 
     def test_per_device_interval_overrides_global_fixed_hours(self):
-        SNMPSyncConfig.objects.create(sync_interval_hours=24, sync_at_hours="3,15")
+        SNMPSyncConfig.objects.create(sync_interval_minutes=24, sync_at_hours="3,15")
         cfg = DeviceSNMPConfig.objects.create(
-            device=self.device, snmp_version="2c", community="public", sync_interval_hours=8,
+            device=self.device, snmp_version="2c", community="public", sync_interval_minutes=8,
         )
         ref = timezone.now().replace(hour=4, minute=30, second=0, microsecond=0)
 
-        self.assertEqual(cfg.get_effective_sync_interval_hours(), 8)
+        self.assertEqual(cfg.get_effective_sync_interval_minutes(), 8)
         self.assertEqual(cfg.get_allowed_sync_hours(), set())
-        self.assertEqual(cfg.get_next_sync_time(ref), ref + timedelta(hours=8))
+        self.assertEqual(cfg.get_next_sync_time(ref), ref + timedelta(minutes=8))
 
     def test_per_device_fixed_hours_override_interval(self):
-        SNMPSyncConfig.objects.create(sync_interval_hours=8)
+        SNMPSyncConfig.objects.create(sync_interval_minutes=8)
         cfg = DeviceSNMPConfig.objects.create(
             device=self.device, snmp_version="2c", community="public",
-            sync_interval_hours=4, sync_at_hours="15,3",
+            sync_interval_minutes=4, sync_at_hours="15,3",
         )
         ref = timezone.now().replace(hour=4, minute=30, second=0, microsecond=0)
 
@@ -587,9 +681,9 @@ class DeviceSNMPConfigTestCase(TestCase):
         self.assertGreater(next_sync, ref)
 
     def test_per_device_zero_interval_disables_global_schedule(self):
-        SNMPSyncConfig.objects.create(sync_interval_hours=8)
+        SNMPSyncConfig.objects.create(sync_interval_minutes=8)
         cfg = DeviceSNMPConfig.objects.create(
-            device=self.device, snmp_version="2c", community="public", sync_interval_hours=0,
+            device=self.device, snmp_version="2c", community="public", sync_interval_minutes=0,
         )
 
         self.assertFalse(cfg.is_schedule_enabled())
@@ -599,10 +693,10 @@ class DeviceSNMPConfigTestCase(TestCase):
         self.assertEqual(cfg.sync_state_label, "Disabled")
 
     def test_scheduler_does_not_queue_disabled_per_device_schedule(self):
-        SNMPSyncConfig.objects.create(sync_interval_hours=8)
+        SNMPSyncConfig.objects.create(sync_interval_minutes=8)
         cfg = DeviceSNMPConfig.objects.create(
             device=self.device, snmp_version="2c", community="public",
-            target_override="10.0.0.1", sync_interval_hours=0,
+            target_override="10.0.0.1", sync_interval_minutes=0,
             next_sync_at=timezone.now() - timedelta(hours=1),
         )
         runner = ScheduledSNMPSyncJob(SimpleNamespace(user=None))
@@ -616,7 +710,7 @@ class DeviceSNMPConfigTestCase(TestCase):
         self.assertIsNone(cfg.next_sync_at)
 
     def test_scheduler_reanchors_missed_schedule_after_long_downtime(self):
-        SNMPSyncConfig.objects.create(sync_interval_hours=1, sync_missed_schedule_grace_minutes=360)
+        SNMPSyncConfig.objects.create(sync_interval_minutes=1, sync_missed_schedule_grace_minutes=360)
         cfg = DeviceSNMPConfig.objects.create(
             device=self.device,
             snmp_version="2c",
@@ -641,7 +735,7 @@ class DeviceSNMPConfigTestCase(TestCase):
         self.assertIn("Re-anchored missed SNMP sync schedule", cfg.last_sync_message)
 
     def test_scheduler_still_queues_recently_due_schedule(self):
-        SNMPSyncConfig.objects.create(sync_interval_hours=1, sync_missed_schedule_grace_minutes=360)
+        SNMPSyncConfig.objects.create(sync_interval_minutes=1, sync_missed_schedule_grace_minutes=360)
         cfg = DeviceSNMPConfig.objects.create(
             device=self.device,
             snmp_version="2c",
@@ -664,19 +758,19 @@ class DeviceSNMPConfigTestCase(TestCase):
         self.assertEqual(str(cfg.sync_job_id), fake_job.job_id)
 
     def test_per_device_schedule_change_reanchors_next_sync(self):
-        SNMPSyncConfig.objects.create(sync_interval_hours=24)
+        SNMPSyncConfig.objects.create(sync_interval_minutes=24)
         cfg = DeviceSNMPConfig.objects.create(
             device=self.device, snmp_version="2c", community="public",
             next_sync_at=timezone.now() + timedelta(hours=24),
         )
 
         before_save = timezone.now()
-        cfg.sync_interval_hours = 8
+        cfg.sync_interval_minutes = 8
         cfg.save()
         cfg.refresh_from_db()
 
-        self.assertGreaterEqual(cfg.next_sync_at, before_save + timedelta(hours=8))
-        self.assertLess(cfg.next_sync_at, before_save + timedelta(hours=8, minutes=1))
+        self.assertGreaterEqual(cfg.next_sync_at, before_save + timedelta(minutes=8))
+        self.assertLess(cfg.next_sync_at, before_save + timedelta(minutes=8, seconds=5))
 
     def test_device_form_rejects_invalid_sync_hours(self):
         form = DeviceSNMPConfigForm(
@@ -689,7 +783,7 @@ class DeviceSNMPConfigTestCase(TestCase):
                 "timeout": 2.0,
                 "retries": 1,
                 "skip_loopback_ips": True,
-                "sync_interval_hours": "",
+                "sync_interval_minutes": "",
                 "sync_at_hours": "3,99",
             }
         )
@@ -698,7 +792,7 @@ class DeviceSNMPConfigTestCase(TestCase):
         self.assertIn("sync_at_hours", form.errors)
 
     def test_settings_form_reanchors_existing_configs(self):
-        settings = SNMPSyncConfig.objects.create(sync_interval_hours=24)
+        settings = SNMPSyncConfig.objects.create(sync_interval_minutes=24)
         cfg = DeviceSNMPConfig.objects.create(
             device=self.device, snmp_version="2c", community="public",
             next_sync_at=timezone.now() + timedelta(hours=24),
@@ -706,7 +800,7 @@ class DeviceSNMPConfigTestCase(TestCase):
 
         form = SNMPSyncConfigForm(
             data={
-                "sync_interval_hours": 8,
+                "sync_interval_minutes": 8,
                 "sync_at_hours": "",
                 "sync_job_timeout_seconds": settings.sync_job_timeout_seconds,
                 "sync_stale_job_marker_minutes": settings.sync_stale_job_marker_minutes,
@@ -727,11 +821,11 @@ class DeviceSNMPConfigTestCase(TestCase):
         form.save()
         cfg.refresh_from_db()
 
-        self.assertGreaterEqual(cfg.next_sync_at, before_save + timedelta(hours=8))
-        self.assertLess(cfg.next_sync_at, before_save + timedelta(hours=8, minutes=1))
+        self.assertGreaterEqual(cfg.next_sync_at, before_save + timedelta(minutes=8))
+        self.assertLess(cfg.next_sync_at, before_save + timedelta(minutes=8, seconds=5))
 
     def test_settings_form_spreads_existing_configs(self):
-        settings = SNMPSyncConfig.objects.create(sync_interval_hours=24)
+        settings = SNMPSyncConfig.objects.create(sync_interval_minutes=24)
         devices = [self.device]
         for index in range(2, 5):
             devices.append(Device.objects.create(
@@ -745,7 +839,7 @@ class DeviceSNMPConfigTestCase(TestCase):
 
         form = SNMPSyncConfigForm(
             data={
-                "sync_interval_hours": 8,
+                "sync_interval_minutes": 8,
                 "sync_at_hours": "",
                 "sync_job_timeout_seconds": settings.sync_job_timeout_seconds,
                 "sync_stale_job_marker_minutes": settings.sync_stale_job_marker_minutes,
@@ -769,7 +863,7 @@ class DeviceSNMPConfigTestCase(TestCase):
         self.assertLessEqual(max(next_times) - min(next_times), timedelta(minutes=15))
 
     def test_settings_form_does_not_reanchor_per_device_override(self):
-        settings = SNMPSyncConfig.objects.create(sync_interval_hours=24)
+        settings = SNMPSyncConfig.objects.create(sync_interval_minutes=24)
         inherited_cfg = DeviceSNMPConfig.objects.create(
             device=self.device, snmp_version="2c", community="public",
             next_sync_at=timezone.now() + timedelta(hours=24),
@@ -783,12 +877,12 @@ class DeviceSNMPConfigTestCase(TestCase):
         override_next = timezone.now() + timedelta(hours=3)
         override_cfg = DeviceSNMPConfig.objects.create(
             device=override_device, snmp_version="2c", community="public",
-            sync_interval_hours=12, next_sync_at=override_next,
+            sync_interval_minutes=12, next_sync_at=override_next,
         )
 
         form = SNMPSyncConfigForm(
             data={
-                "sync_interval_hours": 8,
+                "sync_interval_minutes": 8,
                 "sync_at_hours": "",
                 "sync_job_timeout_seconds": settings.sync_job_timeout_seconds,
                 "sync_stale_job_marker_minutes": settings.sync_stale_job_marker_minutes,
@@ -810,11 +904,11 @@ class DeviceSNMPConfigTestCase(TestCase):
         inherited_cfg.refresh_from_db()
         override_cfg.refresh_from_db()
 
-        self.assertGreaterEqual(inherited_cfg.next_sync_at, before_save + timedelta(hours=8))
+        self.assertGreaterEqual(inherited_cfg.next_sync_at, before_save + timedelta(minutes=8))
         self.assertEqual(override_cfg.next_sync_at, override_next)
 
     def test_global_reschedule_spreads_per_device_only_schedules(self):
-        SNMPSyncConfig.objects.create(sync_interval_hours=0)
+        SNMPSyncConfig.objects.create(sync_interval_minutes=0)
         devices = [self.device]
         for index in range(2, 5):
             devices.append(Device.objects.create(
@@ -825,7 +919,7 @@ class DeviceSNMPConfigTestCase(TestCase):
             ))
         for device in devices:
             DeviceSNMPConfig.objects.create(
-                device=device, snmp_version="2c", community="public", sync_interval_hours=8,
+                device=device, snmp_version="2c", community="public", sync_interval_minutes=8,
             )
 
         DeviceSNMPConfig.reset_all_next_sync(timezone.now())

@@ -11,10 +11,16 @@
             class="btn btn-cyan btn-sm">
       <i class="mdi mdi-access-point-check"></i> Test selected
     </button>
+    <button type="submit" name="_sync" formnovalidate
+            formaction="{% url 'plugins:netbox_snmp_sync:devicesnmpconfig_bulk_sync' %}"
+            class="btn btn-secondary btn-sm">
+      <i class="mdi mdi-calendar-sync"></i> Sync &amp; schedule
+    </button>
     <button type="submit" name="_reconcile_markers" formnovalidate
             formaction="{% url 'plugins:netbox_snmp_sync:devicesnmpconfig_bulk_reconcile_markers' %}"
-            class="btn btn-warning btn-sm">
-      <i class="mdi mdi-broom"></i> Reconcile markers
+            class="btn btn-warning btn-sm"
+            title="Clear stuck Queued/Running status left over from a worker or container restart">
+      <i class="mdi mdi-broom"></i> Clear stuck syncs
     </button>
     <button type="submit" name="_reset_schedule" formnovalidate
             formaction="{% url 'plugins:netbox_snmp_sync:devicesnmpconfig_bulk_reset_schedule' %}"

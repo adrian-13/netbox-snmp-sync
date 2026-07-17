@@ -63,8 +63,9 @@
           {% if object.sync_job_id %}
           <form method="post" action="{% url 'plugins:netbox_snmp_sync:devicesnmpconfig_reconcile_marker' pk=object.pk %}" class="d-inline">
             {% csrf_token %}
-            <button type="submit" class="btn btn-sm btn-warning">
-              <i class="mdi mdi-broom"></i> Reconcile marker
+            <button type="submit" class="btn btn-sm btn-warning"
+                    title="Clear stuck Queued/Running status left over from a worker or container restart">
+              <i class="mdi mdi-broom"></i> Clear stuck sync
             </button>
           </form>
           {% endif %}
